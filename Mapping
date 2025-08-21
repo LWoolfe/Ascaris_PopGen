@@ -1,36 +1,29 @@
 # Analysis of population structure of Ascaris sp.  
 
 ## Table of contents
-0. [Project overview](#overview)
-1. [Project setup](#setup)
-2. [Raw data](#raw)
-3. [Mapping](#mapping)
-4. [Variant calling](#variantcalling)
-5. [Quality control](#qc)
+1. Project setup
+2. Raw data
+3. Mapping
 
-## 00 - Project overview
-
-The aim of this work is to analyse the population structure Ascaris sp. using publicly available WGS reads and newly synthesised data across diverse geographical regions and from both human and porcine hosts. 
 
 ## 01 - Project setup 
-### Setup a working environment for the analysis.
+# Setup a working environment for the analysis.
 mkdir Pop_gen
 cd Pop_gen
 
 # make working directories
 mkdir 00_METADATA 01-reference 02-raw_sequences 03-mapping 04-variants 05-QC 06-analysis
 ```
-## 02-raw_sequences
+## 02 - Raw Data
 # Download publicly available WGS reads using SRA toolkit
-
 # Trim and perform fastqc on all data 
 
 fastp 
 fast qc 
 multiqc
 
-cd 01_REFERENCES
 # Download the A. suum reference genome on ncbi using SRA Toolkit 
+cd 01-reference
 prefetch GCA_013433145.1
 
 # Validate the downloaded genome 
@@ -39,7 +32,7 @@ vdb-validate GCA_013433145.1
 # Unzip
 gunzip GCA_013433145.1_ASM1343314V1_genomic.fa.gz
 
-#Ensure that GCA_013433145.1_ASM1343314v1_assembly_report.txt was downloaded then create a list of primary scaffolds
+#Ensure that GCA_013433145.1_ASM1343314v1_assembly_report.txt was downloaded, then create a list of primary scaffolds
 #Check headers are correct
 grep -v "^#" GCA_013433145.1_ASM1343314v1_assembly_report.txt | head
 grep -v "^#" GCA_013433145.1_ASM1343314v1_assembly_report.txt \
@@ -61,12 +54,12 @@ grep -v "^#" GCA_013433145.1_ASM1343314v1_assembly_report.txt \
 wc -l scaffolds_primary.txt
 
 ## 03 - Mapping 
-### Map sequence reads to reference genome
+# Map sequence reads to reference genome
 
 cd 03-mapping
 conda activate BWA
 chmod +x mapping.sh
-./mapping.sh
+./mapping.sh               #see script below
 
 #!/usr/bin/env bash
 set -euo pipefail
@@ -74,7 +67,7 @@ shopt -s nullglob
 
 # --- Auto‑detect system resources ---
 THREADS_TOTAL=$(nproc)  # total CPU cores
-TOTAL_MEM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)  # in GB
+TOTAL_MEM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)  
 
 # --- Resource allocation policy ---
 RESERVE_PCT=20                  # % RAM to leave for OS/background
@@ -167,7 +160,7 @@ process_sample() {
 export -f process_sample
 export READS_DIR OUT_DIR QC_DIR REF_GENOME THREADS_PER_JOB SAMTOOLS_SORT_MEM TMPDIR
 
-# Prefer GNU parallel; fallback to xargs if not present
+# Prefer GNU parallel
 if command -v parallel >/dev/null 2>&1; then
   parallel --jobs "${JOBS}" --eta --joblog "${QC_DIR}/parallel.log" \
     --halt soon,fail=1 \
@@ -180,10 +173,10 @@ fi
 
 conda deactivate 
 
-### Mark PCR duplicates
+## Mark PCR duplicates
 conda activate GATK
 chmod +x Markdup.sh
-./Markdup.sh 
+./Markdup.sh    #see script below
 
 #!/bin/bash
 set -e
@@ -228,7 +221,7 @@ done
 wait
 echo "🎉 All samples processed and QC complete."
 
-##Assessment of Mapping and Preprocessing. 
+## Assessment of Mapping and Preprocessing. 
 
 
 
