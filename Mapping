@@ -1,0 +1,241 @@
+# Analysis of population structure of Ascaris sp.  
+
+## Table of contents
+0. [Project overview](#overview)
+1. [Project setup](#setup)
+2. [Raw data](#raw)
+3. [Mapping](#mapping)
+4. [Variant calling](#variantcalling)
+5. [Quality control](#qc)
+
+## 00 - Project overview
+
+The aim of this work is to analyse the population structure Ascaris sp. using publicly available WGS reads and newly synthesised data across diverse geographical regions and from both human and porcine hosts. 
+
+## 01 - Project setup 
+### Setup a working environment for the analysis.
+mkdir Pop_gen
+cd Pop_gen
+
+# make working directories
+mkdir 00_METADATA 01-reference 02-raw_sequences 03-mapping 04-variants 05-QC 06-analysis
+```
+## 02-raw_sequences
+# Download publicly available WGS reads using SRA toolkit
+
+# Trim and perform fastqc on all data 
+
+fastp 
+fast qc 
+multiqc
+
+cd 01_REFERENCES
+# Download the A. suum reference genome on ncbi using SRA Toolkit 
+prefetch GCA_013433145.1
+
+# Validate the downloaded genome 
+vdb-validate GCA_013433145.1
+
+# Unzip
+gunzip GCA_013433145.1_ASM1343314V1_genomic.fa.gz
+
+#Ensure that GCA_013433145.1_ASM1343314v1_assembly_report.txt was downloaded then create a list of primary scaffolds
+#Check headers are correct
+grep -v "^#" GCA_013433145.1_ASM1343314v1_assembly_report.txt | head
+grep -v "^#" GCA_013433145.1_ASM1343314v1_assembly_report.txt \
+  | awk -F '\t' '$2 == "assembled-molecule" && ($1 ~ /^chr[0-9]+$/ || $1 == "chrX") {print $5}' \
+  > scaffolds_primary_plus_X.txt
+
+# Exclude unmapped scaffolds (include only primary scaffolds)
+seqtk subseq genome.fna scaffolds_primary_plus_X.txt > Ascaris_primary_scaffolds_plus_X.fasta
+
+# Create indexes and a sequence dictionary for the reference genome
+bwa index Ascaris_primary_scaffolds_plus_X.fasta
+samtools faidx Ascaris_primary_scaffolds_plus_X.fasta
+gatk CreateSequenceDictionary --REFERENCE Ascaris_primary_scaffolds_plus_X.fasta
+
+# Check all primary scaffolds are present
+grep -v "^#" GCA_013433145.1_ASM1343314v1_assembly_report.txt \
+  | awk -F '\t' '$2 == "assembled-molecule" && $1 ~ /^chr[0-9]+$/ {print $1}' \
+  | wc -l
+wc -l scaffolds_primary.txt
+
+## 03 - Mapping 
+### Map sequence reads to reference genome
+
+cd 03-mapping
+conda activate BWA
+chmod +x mapping.sh
+./mapping.sh
+
+#!/usr/bin/env bash
+set -euo pipefail
+shopt -s nullglob
+
+# --- Auto‑detect system resources ---
+THREADS_TOTAL=$(nproc)  # total CPU cores
+TOTAL_MEM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)  # in GB
+
+# --- Resource allocation policy ---
+RESERVE_PCT=20                  # % RAM to leave for OS/background
+JOBS=4                           # samples processed in parallel
+THREADS_PER_JOB=$(( THREADS_TOTAL / JOBS ))
+(( THREADS_PER_JOB >= 1 )) || THREADS_PER_JOB=1
+
+PER_JOB_MEM="$(( (TOTAL_MEM_GB * (100 - RESERVE_PCT) / 100) / JOBS ))G"
+
+# --- Hard cap per-job memory to avoid mlock/ulimit issues ---
+MAX_SORT_MEM="4G"
+if (( ${PER_JOB_MEM%G} > ${MAX_SORT_MEM%G} )); then
+    SAMTOOLS_SORT_MEM="${MAX_SORT_MEM}"
+else
+    SAMTOOLS_SORT_MEM="${PER_JOB_MEM}"
+fi
+
+# Prefer fast local scratch if available
+: "${TMPDIR:=/tmp}"
+
+REF_DIR="01-reference"
+READS_DIR="02-raw_reads"
+OUT_DIR="03-mapping"
+QC_DIR="${OUT_DIR}/qc"
+REF_GENOME="${REF_DIR}/Ascaris_primary_scaffolds_plus_X.fasta"
+
+mkdir -p "${OUT_DIR}" "${QC_DIR}"
+
+# --- Preflight checks ---
+R1_FILES=( "${READS_DIR}"/*_trimmed_R1.fq.gz )
+if (( ${#R1_FILES[@]} == 0 )); then
+  echo "ERROR: no R1 FASTQs found in ${READS_DIR} matching *_trimmed_R1.fq.gz" >&2
+  exit 1
+fi
+
+[[ -s "${REF_GENOME}" ]] || { echo "ERROR: missing reference FASTA ${REF_GENOME}" >&2; exit 1; }
+
+if ! ls "${REF_GENOME}".* 1>/dev/null 2>&1; then
+  echo "Indexing reference for bwa..." >&2
+  bwa index "${REF_GENOME}"
+fi
+
+[[ -s "${REF_GENOME}.fai" ]] || samtools faidx "${REF_GENOME}"
+
+process_sample() {
+  local R1="$1"
+  local SAMPLE R2 HEADER FLOWCELL LANE PU RGID BAM
+
+  SAMPLE="$(basename "$R1" _trimmed_R1.fq.gz)"
+  R2="${READS_DIR}/${SAMPLE}_trimmed_R2.fq.gz"
+  BAM="${OUT_DIR}/${SAMPLE}.bam"
+
+  [[ -s "$R2" ]] || { echo "ERROR: missing R2 for ${SAMPLE}" >&2; return 1; }
+
+  echo "$(date +'%F %T') $$ Mapping ${SAMPLE} (threads=${THREADS_PER_JOB}, mem=${SAMTOOLS_SORT_MEM})" >&2
+
+  if ! read -r HEADER < <(zcat -f -- "$R1" 2>/dev/null | head -n1); then
+    HEADER=""
+  fi
+
+  FLOWCELL="$(awk -F':' '{if(NF>=3) print $3}' <<<"$HEADER")"
+  LANE="$(awk -F':' '{if(NF>=4) print $4}' <<<"$HEADER")"
+  if [[ -n "${FLOWCELL}" && -n "${LANE}" ]]; then
+    PU="${FLOWCELL}.${LANE}"; RGID="${PU}"
+  else
+    PU="${SAMPLE}.PU"; RGID="${SAMPLE}"
+  fi
+
+  # Map + sort to BAM
+  bwa mem -t "${THREADS_PER_JOB}" \
+    -R "@RG\tID:${RGID}\tSM:${SAMPLE}\tPL:ILLUMINA\tLB:lib1\tPU:${PU}" \
+    "${REF_GENOME}" "${R1}" "${R2}" \
+  | samtools sort -@"${THREADS_PER_JOB}" -m "${SAMTOOLS_SORT_MEM}" -T "${TMPDIR}/${SAMPLE}.sort" \
+      -o "${BAM}" - \
+  || { echo "ERROR: sort failed for ${SAMPLE}" >&2; return 1; }
+
+  # Index + QC
+  samtools index -@"${THREADS_PER_JOB}" "${BAM}"
+
+  samtools view -H "${BAM}" | grep -q '^@RG' \
+    || { echo "ERROR: @RG missing in ${SAMPLE}.bam" >&2; return 1; }
+
+  samtools flagstat "${BAM}" > "${QC_DIR}/${SAMPLE}.flagstat.txt"
+  [[ -s "${QC_DIR}/${SAMPLE}.flagstat.txt" ]] \
+    || { echo "ERROR: flagstat failed for ${SAMPLE}" >&2; return 1; }
+
+  echo "$(date +'%F %T') $$ Finished ${SAMPLE}" >&2
+}
+
+export -f process_sample
+export READS_DIR OUT_DIR QC_DIR REF_GENOME THREADS_PER_JOB SAMTOOLS_SORT_MEM TMPDIR
+
+# Prefer GNU parallel; fallback to xargs if not present
+if command -v parallel >/dev/null 2>&1; then
+  parallel --jobs "${JOBS}" --eta --joblog "${QC_DIR}/parallel.log" \
+    --halt soon,fail=1 \
+    --env process_sample --env READS_DIR --env OUT_DIR --env QC_DIR --env REF_GENOME \
+    --env THREADS_PER_JOB --env SAMTOOLS_SORT_MEM --env TMPDIR \
+    bash -c 'process_sample "$@"' _ ::: "${R1_FILES[@]}"
+else
+  printf '%s\0' "${R1_FILES[@]}" | xargs -0 -n1 -P "${JOBS}" bash -c 'process_sample "$0"'
+fi
+
+conda deactivate 
+
+### Mark PCR duplicates
+conda activate GATK
+chmod +x Markdup.sh
+./Markdup.sh 
+
+#!/bin/bash
+set -e
+
+MAX_JOBS=4
+QC_DIR="qc_metrics"
+mkdir -p "$QC_DIR"
+
+for bamfile in *.bam; do
+  sample="${bamfile%.bam}"
+  echo "🚀 Starting $sample..."
+
+  (
+    # Mark duplicates
+    gatk MarkDuplicates \
+      --INPUT "$bamfile" \
+      --OUTPUT "${sample}.markdup.bam" \
+      --METRICS_FILE "${sample}.metrics.txt"
+
+    # Index the marked BAM
+    samtools index "${sample}.markdup.bam"
+
+    # Run flagstat on marked BAM
+    samtools flagstat "${sample}.markdup.bam" > "${QC_DIR}/${sample}.flagstat.txt"
+
+    # Check flagstat output
+    if [[ -s "${QC_DIR}/${sample}.flagstat.txt" ]]; then
+      echo "$(date +'%F %T') $$ ✅ Finished ${sample}" >&2
+    else
+      echo "❌ ERROR: flagstat failed for ${sample}" >&2
+      exit 1
+    fi
+  ) &
+
+  # Limit number of concurrent jobs
+  while (( $(jobs -rp | wc -l) >= MAX_JOBS )); do
+    echo "⏳ Currently running: $(jobs -rp | wc -l) jobs..."
+    sleep 1
+  done
+done
+
+wait
+echo "🎉 All samples processed and QC complete."
+
+##Assessment of Mapping and Preprocessing. 
+
+
+
+
+
+
+
+
+
+
