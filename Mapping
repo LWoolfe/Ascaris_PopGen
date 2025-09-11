@@ -53,6 +53,9 @@ grep -v "^#" GCA_013433145.1_ASM1343314v1_assembly_report.txt \
   | wc -l
 wc -l scaffolds_primary.txt
 
+conda activate gatk 
+gatk CreateSequenceDictionary -R Ascaris_primary_scaffolds_plus_X.fa
+
 ## 03 - Mapping 
 # Map sequence reads to reference genome
 
