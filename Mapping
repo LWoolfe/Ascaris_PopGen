@@ -222,6 +222,123 @@ wait
 echo "🎉 All samples processed and QC complete."
 
 ## Assessment of Mapping and Preprocessing. 
+#use samtools to depth per base to create 10kb windows for duther analysis. 
+
+./coverage_pipline.sh #script below.
+
+#!/bin/bash
+set -e
+
+W=10000  # window size in bp
+
+export W
+
+# ---------------------------
+# Step 1: Process BAMs in parallel
+# ---------------------------
+
+process_bam() {
+    bam="$1"
+    sample=${bam%.markdup.bam}
+    echo "Processing $sample..."
+
+    samtools depth -aa "$bam" \
+    | awk -v W="$W" '
+      BEGIN { OFS="\t"; prev_chr=""; sum=0; cnt=0; cov=0 }
+      {
+        chr=$1; pos=$2; d=$3
+        bin=int((pos-1)/W)
+        if (chr != prev_chr || bin != cur_bin) {
+          if (cnt) {
+            start=cur_bin*W; end=start+W
+            mean=sum/cnt; frac=cov/cnt
+            print prev_chr, start, end, mean, frac
+          }
+          prev_chr=chr; cur_bin=bin
+          sum=d; cnt=1; cov=(d>0?1:0)
+        } else {
+          sum+=d; cnt++; cov+=(d>0?1:0)
+        }
+      }
+      END {
+        if (cnt) {
+          start=cur_bin*W; end=start+W
+          mean=sum/cnt; frac=cov/cnt
+          print prev_chr, start, end, mean, frac
+        }
+      }' > "${sample}.metrics10kb.bed"
+}
+
+export -f process_bam
+
+# Run in parallel across all BAMs
+parallel process_bam ::: *.markdup.bam
+
+# ---------------------------
+# Step 2: Merge into matrices
+# ---------------------------
+
+# Get window coordinates from the first file
+first_file=$(ls *.metrics10kb.bed | head -n 1)
+cut -f1-3 "$first_file" > windows.tmp
+
+# Build header
+header="chr\tstart\tend"
+for f in *.metrics10kb.bed; do
+  sample=${f%.metrics10kb.bed}
+  header+="\t$sample"
+done
+
+# Write headers
+echo -e "$header" > depth_matrix.tsv
+echo -e "$header" > coverage_matrix.tsv
+
+# Initialise bodies
+cp windows.tmp depth_body.tmp
+cp windows.tmp coverage_body.tmp
+
+# Append each sample’s columns
+for f in *.metrics10kb.bed; do
+  cut -f4 "$f" > depth.tmp
+  cut -f5 "$f" > coverage.tmp
+  paste depth_body.tmp depth.tmp > tmp && mv tmp depth_body.tmp
+  paste coverage_body.tmp coverage.tmp > tmp && mv tmp coverage_body.tmp
+  rm depth.tmp coverage.tmp
+done
+
+# Combine headers + bodies
+cat depth_matrix.tsv depth_body.tmp > mean_depth_matrix.tsv
+cat coverage_matrix.tsv coverage_body.tmp > coverage_fraction_matrix.tsv
+
+# Clean up temp files
+rm windows.tmp depth_body.tmp coverage_body.tmp depth_matrix.tsv coverage_matrix.tsv
+
+# ---------------------------
+# Step 3: Median & stdev across samples
+# ---------------------------
+
+# Function to summarise a matrix
+summarise_matrix() {
+    matrix="$1"
+    out="$2"
+    # Get number of columns
+    last_col=$(awk '{print NF}' "$matrix" | sort -nu | tail -n1)
+    datamash -H -t $'\t' \
+        groupby 1,2,3 \
+        median 4-"$last_col" \
+        sstdev 4-"$last_col" \
+        < "$matrix" > "$out"
+}
+
+summarise_matrix coverage_fraction_matrix.tsv coverage_fraction_summary.tsv
+summarise_matrix mean_depth_matrix.tsv mean_depth_summary.tsv
+
+echo "✅ All done!"
+echo "Outputs:"
+echo " - mean_depth_matrix.tsv"
+echo " - coverage_fraction_matrix.tsv"
+echo " - mean_depth_summary.tsv"
+echo " - coverage_fraction_summary.tsv"
 
 
 
