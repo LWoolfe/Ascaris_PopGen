@@ -225,7 +225,6 @@ echo "🎉 All samples processed and QC complete."
 #use samtools to depth per base to create 10kb windows for duther analysis. 
 
 ./coverage_pipline.sh #script below.
-
 #!/bin/bash
 set -e
 
@@ -234,7 +233,7 @@ W=10000  # window size in bp
 export W
 
 # ---------------------------
-# Step 1: Process BAMs in parallel
+# Step 1: Process BAMs in parallel (or sequential if parallel not installed)
 # ---------------------------
 
 process_bam() {
@@ -271,33 +270,34 @@ process_bam() {
 
 export -f process_bam
 
-# Run in parallel across all BAMs
-parallel process_bam ::: *.markdup.bam
+if command -v parallel >/dev/null 2>&1; then
+    parallel process_bam ::: *.markdup.bam
+else
+    echo "⚠️ GNU parallel not found — running sequentially"
+    for bam in *.markdup.bam; do
+        process_bam "$bam"
+    done
+fi
 
 # ---------------------------
 # Step 2: Merge into matrices
 # ---------------------------
 
-# Get window coordinates from the first file
 first_file=$(ls *.metrics10kb.bed | head -n 1)
 cut -f1-3 "$first_file" > windows.tmp
 
-# Build header
 header="chr\tstart\tend"
 for f in *.metrics10kb.bed; do
   sample=${f%.metrics10kb.bed}
   header+="\t$sample"
 done
 
-# Write headers
 echo -e "$header" > depth_matrix.tsv
 echo -e "$header" > coverage_matrix.tsv
 
-# Initialise bodies
 cp windows.tmp depth_body.tmp
 cp windows.tmp coverage_body.tmp
 
-# Append each sample’s columns
 for f in *.metrics10kb.bed; do
   cut -f4 "$f" > depth.tmp
   cut -f5 "$f" > coverage.tmp
@@ -306,28 +306,22 @@ for f in *.metrics10kb.bed; do
   rm depth.tmp coverage.tmp
 done
 
-# Combine headers + bodies
 cat depth_matrix.tsv depth_body.tmp > mean_depth_matrix.tsv
 cat coverage_matrix.tsv coverage_body.tmp > coverage_fraction_matrix.tsv
 
-# Clean up temp files
 rm windows.tmp depth_body.tmp coverage_body.tmp depth_matrix.tsv coverage_matrix.tsv
 
 # ---------------------------
-# Step 3: Median & stdev across samples
+# Step 3: Median & stdev across samples (reshape to long format first)
 # ---------------------------
 
-# Function to summarise a matrix
 summarise_matrix() {
     matrix="$1"
     out="$2"
-    # Get number of columns
-    last_col=$(awk '{print NF}' "$matrix" | sort -nu | tail -n1)
-    datamash -H -t $'\t' \
-        groupby 1,2,3 \
-        median 4-"$last_col" \
-        sstdev 4-"$last_col" \
-        < "$matrix" > "$out"
+    tail -n +2 "$matrix" \
+    | awk 'BEGIN{OFS="\t"} {chr=$1; start=$2; end=$3; for(i=4;i<=NF;i++){print chr, start, end, $i}}' \
+    | datamash -g 1,2,3 median 4 sstdev 4 \
+    > "$out"
 }
 
 summarise_matrix coverage_fraction_matrix.tsv coverage_fraction_summary.tsv
@@ -339,6 +333,7 @@ echo " - mean_depth_matrix.tsv"
 echo " - coverage_fraction_matrix.tsv"
 echo " - mean_depth_summary.tsv"
 echo " - coverage_fraction_summary.tsv"
+
 
 
 
