@@ -337,7 +337,7 @@ echo " - coverage_fraction_matrix.tsv"
 echo " - mean_depth_summary.tsv"
 echo " - coverage_fraction_summary.tsv"
 
-###Variant Calling 
+### 04 Variant Calling 
 ./run_haplotypecaller.sh #script below
 
 #!/bin/bash
@@ -360,8 +360,8 @@ call_variants() {
         --emit-ref-confidence GVCF \
         -I "$bam" \
         -R "$REF_DIR/Ascaris_primary_scaffolds_plus_X.fasta" \
-        -O "$VAR_DIR/${sample}.g.vcf.gz"
-    tabix -p vcf "$VAR_DIR/${sample}.g.vcf.gz"
+        -O "$VAR_DIR/${sample}.g.vcf.gz"  # compressed output file
+    tabix -p vcf "$VAR_DIR/${sample}.g.vcf.gz" # automatically produce index
 }
 
 export -f call_variants
@@ -379,10 +379,8 @@ fi
 
 echo "✅ All GVCFs are in $VAR_DIR"
 
+## 4.1 meging gVCF files and running genotyping
 
-
-
-Conda activate gatk 
 ./genotyping.sh  # see script below
 
 #!/bin/bash
@@ -447,6 +445,8 @@ echo "Outputs:"
 echo " - Combined GVCF: $COMBINED_GVCF"
 echo " - Final multi-sample VCF: $FINAL_VCF"
 echo " - QC metrics table: $QC_TABLE"
+
+## 05 Quality Control 
 
 
 
