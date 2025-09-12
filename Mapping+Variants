@@ -337,6 +337,116 @@ echo " - coverage_fraction_matrix.tsv"
 echo " - mean_depth_summary.tsv"
 echo " - coverage_fraction_summary.tsv"
 
+###Variant Calling 
+./run_haplotypecaller.sh #script below
+
+#!/bin/bash
+set -euo pipefail
+
+# Define directories
+MAP_DIR="03-mapping"
+REF_DIR="01-reference"
+VAR_DIR="04-variants"
+
+# Make sure output directory exists
+mkdir -p "$VAR_DIR"
+
+# Function to run HaplotypeCaller for one BAM
+call_variants() {
+    bam="$1"
+    sample=$(basename "$bam" .bam)
+    echo "Calling variants for $sample..."
+    gatk HaplotypeCaller \
+        --emit-ref-confidence GVCF \
+        -I "$bam" \
+        -R "$REF_DIR/Ascaris_primary_scaffolds_plus_X.fasta" \
+        -O "$VAR_DIR/${sample}.g.vcf.gz"
+    tabix -p vcf "$VAR_DIR/${sample}.g.vcf.gz"
+}
+
+export -f call_variants
+export REF_DIR VAR_DIR
+
+# Run in parallel if available, else sequentially
+if command -v parallel >/dev/null 2>&1; then
+    parallel call_variants ::: "$MAP_DIR"/*.bam
+else
+    echo "⚠️ GNU parallel not found — running sequentially"
+    for bam in "$MAP_DIR"/*.bam; do
+        call_variants "$bam"
+    done
+fi
+
+echo "✅ All GVCFs are in $VAR_DIR"
+
+
+
+
+Conda activate gatk 
+./genotyping.sh  # see script below
+
+#!/bin/bash
+set -euo pipefail
+
+# -----------------------------
+# CONFIGURATION
+# -----------------------------
+VAR_DIR="04-variants"   # folder with per-sample gVCFs
+REF_DIR="01-reference"  # folder with reference FASTA
+REF_FASTA="Ascaris_primary_scaffolds_plus_X.fasta"
+
+# Output file names for preliminary run
+ARG_LIST="argument_prelim.list"
+COMBINED_GVCF="merged_prelim_samples.g.vcf.gz"
+FINAL_VCF="merged_prelim_samples.vcf"
+QC_TABLE="cohort_prelim.genotyped.txt"
+
+# -----------------------------
+# STEP 1: Build argument list
+# -----------------------------
+echo "📄 Building $ARG_LIST from gVCFs in $VAR_DIR..."
+> "$ARG_LIST"
+for gvcf in "$VAR_DIR"/*.g.vcf.gz; do
+    echo "--variant $gvcf" >> "$ARG_LIST"
+done
+echo "✅ Created $ARG_LIST:"
+cat "$ARG_LIST"
+
+# -----------------------------
+# STEP 2: Combine GVCFs
+# -----------------------------
+echo "🔄 Combining GVCFs..."
+gatk CombineGVCFs \
+    --arguments_file "$ARG_LIST" \
+    --reference "$REF_DIR/$REF_FASTA" \
+    --output "$COMBINED_GVCF"
+
+# -----------------------------
+# STEP 3: Joint Genotyping
+# -----------------------------
+echo "🧬 Running joint genotyping..."
+gatk GenotypeGVCFs \
+    --reference "$REF_DIR/$REF_FASTA" \
+    --variant "$COMBINED_GVCF" \
+    --output "$FINAL_VCF"\
+     --native-pair-hmm-threads 16
+
+# -----------------------------
+# STEP 4: QC Table
+# -----------------------------
+echo "📊 Extracting QC metrics..."
+gatk VariantsToTable \
+    --variant "$FINAL_VCF" \
+    -F CHROM -F POS -F TYPE -F QD -F FS -F MQ -F MQRankSum \
+    -F ReadPosRankSum -F SOR -F InbreedingCoeff \
+    -R "$REF_DIR/$REF_FASTA" \
+    --output "$QC_TABLE"
+
+echo "🎉 Preliminary run complete!"
+echo "Outputs:"
+echo " - Combined GVCF: $COMBINED_GVCF"
+echo " - Final multi-sample VCF: $FINAL_VCF"
+echo " - QC metrics table: $QC_TABLE"
 
 
 
