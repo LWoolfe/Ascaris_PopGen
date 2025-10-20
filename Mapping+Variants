@@ -75,9 +75,9 @@ chmod +x coverage_pipline.sh
 
 
 ### 04 Variant Calling 
+cd ../
 ./run_haplotypecaller.sh 
 ./genotyping.sh  
-./run_haplotypecaller.sh
 ./run_SNP_select.sh
 ./run_INDEL_select.sh
 ./combine_VCF.sh
