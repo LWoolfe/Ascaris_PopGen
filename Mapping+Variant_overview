@@ -60,18 +60,11 @@ gatk CreateSequenceDictionary -R Ascaris_primary_scaffolds_plus_X.fa
 
 ## 03 - Mapping 
 # Map sequence reads to reference genome
-
-cd 03-mapping
-conda activate BWA
-chmod +x mapping.sh
 ./mapping.sh           
 
 ## Mark PCR duplicates
-conda activate GATK
-chmod +x Markdup.sh
 ./Markdup.sh    
-
-chmod +x coverage_pipline.sh 
+./coverage_pipline.sh 
 
 
 ### 04 Variant Calling 
