@@ -1,0 +1,78 @@
+#!/bin/bash
+#SBATCH --job-name=bwa_map
+#SBATCH --partition=shared
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=48:00:00
+#SBATCH --array=1-999%6
+#SBATCH --output=/parallel_scratch/lw01165/03_Mapping/logs/bwa_%A_%a.out
+#SBATCH --error=/parallel_scratch/lw01165/03_Mapping/logs/bwa_%A_%a.err
+
+set -euo pipefail
+
+# -------- env --------
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate BWA
+command -v bwa >/dev/null || { echo "bwa not found"; exit 1; }
+command -v samtools >/dev/null || { echo "samtools not found"; exit 1; }
+
+# -------- paths --------
+REF="/parallel_scratch/lw01165/01_Reference/Ascaris_primary_scaffolds_plus_X.fasta"
+READS_DIR="/parallel_scratch/lw01165/02_Samples/samples_fastp"
+OUT_DIR="/parallel_scratch/lw01165/03_Mapping"
+QC_DIR="${OUT_DIR}/Align_QC"
+LOGDIR="${OUT_DIR}/logs"
+TMPDIR="/parallel_scratch/lw01165/tmp_bwa_${SLURM_JOB_ID:-local}"
+
+SAMPLE_LIST="${READS_DIR}/mapped.ids.txt"
+
+mkdir -p "$OUT_DIR" "$QC_DIR" "$LOGDIR" "$TMPDIR"
+
+# -------- index checks (do NOT build here) --------
+for ext in amb ann bwt pac sa; do
+  [[ -s "${REF}.${ext}" ]] || { echo "❌ Missing BWA index: ${REF}.${ext}"; exit 1; }
+done
+[[ -s "${REF}.fai" ]] || { echo "❌ Missing samtools index: ${REF}.fai"; exit 1; }
+
+# -------- pick sample --------
+[[ -s "$SAMPLE_LIST" ]] || { echo "❌ Missing sample list: $SAMPLE_LIST"; exit 1; }
+
+SAMPLE="$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$SAMPLE_LIST" | tr -d '\r' | sed 's/[[:space:]]*$//')"
+[[ -n "${SAMPLE:-}" ]] || { echo "No sample for task ${SLURM_ARRAY_TASK_ID}"; exit 0; }
+
+R1="${READS_DIR}/${SAMPLE}_decon_R1.fq.gz"
+R2="${READS_DIR}/${SAMPLE}_decon_R2.fq.gz"
+BAM="${OUT_DIR}/${SAMPLE}.bam"
+
+[[ -s "$R1" && -s "$R2" ]] || { echo "❌ Missing reads for $SAMPLE: $R1 or $R2"; exit 1; }
+
+# -------- skip if done --------
+if [[ -s "$BAM" && -s "${BAM}.bai" ]]; then
+  echo "✅ $SAMPLE BAM+BAI already exist — skipping"
+  exit 0
+fi
+
+THREADS="${SLURM_CPUS_PER_TASK:-8}"
+SORT_MEM="4G"
+
+# -------- RG / PU from header (best effort) --------
+HEADER="$(zcat "$R1" | head -n1 || true)"
+FLOWCELL="$(awk -F':' '{if(NF>=3) print $3}' <<<"$HEADER")"
+LANE="$(awk -F':' '{if(NF>=4) print $4}' <<<"$HEADER")"
+PU="${FLOWCELL:-${SAMPLE}}.${LANE:-1}"
+RGID="${PU}"
+
+echo "==> $(date) Mapping $SAMPLE on $(hostname) (threads=$THREADS)"
+
+bwa mem -t "$THREADS" \
+  -R "@RG\tID:${RGID}\tSM:${SAMPLE}\tPL:ILLUMINA\tLB:lib1\tPU:${PU}" \
+  "$REF" "$R1" "$R2" \
+| samtools sort -@ "$THREADS" -m "$SORT_MEM" \
+    -T "${TMPDIR}/${SAMPLE}" \
+    -o "$BAM" -
+
+samtools index -@ "$THREADS" "$BAM"
+samtools flagstat "$BAM" > "${QC_DIR}/${SAMPLE}.flagstat.txt"
+
+echo "==> $(date) Done $SAMPLE"
+
