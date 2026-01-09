@@ -1,0 +1,175 @@
+### Pipeline overview: Pre-processing
+# Download raw reads from SRA (paired-end).
+# Trim and quality-filter reads with fastp.
+# Build a combined host (human + pig) index with deacon.
+# Remove host reads with deacon filter.
+# Run FastQC (and MultiQC) on trimmed and host-depleted reads.
+#  NB: all scripts assume paired-end FASTQ files named: SAMPLE_1.fastq.gz SAMPLE_2.fastq.gz and a list of sample IDs (one per line) in a text file.
+
+# 1. Download SRA files
+
+#!/bin/bash
+
+IDFILE="accessions.txt"
+
+while read ACC; do
+  prefetch "$ACC"
+  fasterq-dump --split-files "${ACC}.sra"
+  pigz "${ACC}_1.fastq"
+  pigz "${ACC}_2.fastq"
+done < "$IDFILE"
+
+# 2. Trim reads with fastp (SLURM array example)
+
+#!/bin/bash
+#SBATCH --job-name=fastp_trim
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=8G
+#SBATCH --time=12:00:00
+#SBATCH --array=1-100
+#SBATCH --output=fastp_%A_%a.out
+#SBATCH --error=fastp_%A_%a.err
+
+set -euo pipefail
+
+BASEDIR="/parallel_scratch/lw01165/sra_files"
+SAMPLE_LIST="${BASEDIR}/ids.clean.txt"
+OUTDIR="${BASEDIR}/samples_fastp"
+mkdir -p "$OUTDIR"
+
+R1_SUFFIX="_1.fastq.gz"
+R2_SUFFIX="_2.fastq.gz"
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate fast_env
+
+THREADS="${SLURM_CPUS_PER_TASK:-8}"
+
+SAMPLE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$SAMPLE_LIST" | tr -d '\r')
+[[ -z "$SAMPLE" ]] && { echo "No sample for task ${SLURM_ARRAY_TASK_ID}"; exit 0; }
+
+R1="${BASEDIR}/${SAMPLE}${R1_SUFFIX}"
+R2="${BASEDIR}/${SAMPLE}${R2_SUFFIX}"
+
+OUT_R1="${OUTDIR}/${SAMPLE}_trimmed_R1.fastq"
+OUT_R2="${OUTDIR}/${SAMPLE}_trimmed_R2.fastq"
+OUT_HTML="${OUTDIR}/${SAMPLE}_fastp.html"
+
+fastp \
+  -i "$R1" \
+  -I "$R2" \
+  -o "$OUT_R1" \
+  -O "$OUT_R2" \
+  --thread "$THREADS" \
+  --html "$OUT_HTML" \
+  --detect_adapter_for_pe \
+  --trim_front1 20 \
+  --trim_front2 20 \
+  --length_required 50
+
+pigz "$OUT_R1"
+pigz "$OUT_R2"
+
+# 3. Build deacon host index (human + pig)
+
+#!/bin/bash
+#SBATCH --job-name=deacon_index
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+#SBATCH --output=deacon_index_%j.out
+#SBATCH --error=deacon_index_%j.err
+
+set -euo pipefail
+
+WORKDIR="/parallel_scratch/lw01165/01_Reference/deacon_human_pig"
+FASTA="${WORKDIR}/human_pig_genome.fna"
+IDX="${WORKDIR}/human_pig_genome.idx"
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate deacon
+
+cd "$WORKDIR"
+deacon index build "$FASTA" > "$IDX"
+
+# 4. Host decontamination with deacon
+
+Takes fastp-trimmed reads and outputs host-filtered read pairs.
+
+#!/bin/bash
+#SBATCH --job-name=deacon_deplete
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
+#SBATCH --time=36:00:00
+#SBATCH --output=deacon_deplete_%j.out
+#SBATCH --error=deacon_deplete_%j.err
+
+set -euo pipefail
+
+REFDIR="/parallel_scratch/lw01165/01_Reference/deacon_human_pig"
+IDX="${REFDIR}/human_pig_genome.idx"
+
+BASEDIR="/parallel_scratch/lw01165/sra_files"
+IN_DIR="${BASEDIR}/samples_fastp"      # fastp outputs
+OUT_DIR="${BASEDIR}/samples_deacon"   # deacon outputs
+mkdir -p "$OUT_DIR"
+
+SAMPLE_LIST="${BASEDIR}/ids.clean.txt"
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate deacon
+
+THREADS="${SLURM_CPUS_PER_TASK:-16}"
+
+while read SAMPLE; do
+  [[ -z "$SAMPLE" ]] && continue
+
+  R1="${IN_DIR}/${SAMPLE}_trimmed_R1.fastq.gz"
+  R2="${IN_DIR}/${SAMPLE}_trimmed_R2.fastq.gz"
+
+  OUT_R1="${OUT_DIR}/${SAMPLE}_decon_R1.fastq.gz"
+  OUT_R2="${OUT_DIR}/${SAMPLE}_decon_R2.fastq.gz"
+  OUT_JSON="${OUT_DIR}/${SAMPLE}_deacon_summary.json"
+
+  deacon filter -d "$IDX" "$R1" "$R2" \
+    -o "$OUT_R1" -O "$OUT_R2" \
+    -s "$OUT_JSON" \
+    --threads "$THREADS"
+
+done < "$SAMPLE_LIST"
+
+# 5. FastQC on trimmed + host-depleted reads
+
+Example: run FastQC on both fastp-trimmed and decon reads for each sample, then summarise with MultiQC.
+
+#!/bin/bash
+
+BASEDIR="/parallel_scratch/lw01165/sra_files"
+TRIM_DIR="${BASEDIR}/samples_fastp"
+DECON_DIR="${BASEDIR}/samples_deacon"
+QC_DIR="${BASEDIR}/qc_fastqc"
+SAMPLE_LIST="${BASEDIR}/ids.clean.txt"
+
+mkdir -p "$QC_DIR"
+
+while read SAMPLE; do
+  [[ -z "$SAMPLE" ]] && continue
+
+  fastqc \
+    "${TRIM_DIR}/${SAMPLE}_trimmed_R1.fastq.gz" \
+    "${TRIM_DIR}/${SAMPLE}_trimmed_R2.fastq.gz" \
+    "${DECON_DIR}/${SAMPLE}_decon_R1.fastq.gz" \
+    "${DECON_DIR}/${SAMPLE}_decon_R2.fastq.gz" \
+    -o "$QC_DIR"
+done < "$SAMPLE_LIST"
+
+# Summarise
+multiqc "$QC_DIR" -o "${BASEDIR}/qc_multiqc"
+
+
+
+
+
+
+
+
