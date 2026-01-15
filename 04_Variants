@@ -1,1 +1,27 @@
+## Initial Variant calling to create gVCF files. 
 
+#create a new directory and load the correct cobda environment
+mkdir 04_Variants
+conda activate Gatk4
+
+#create a list of paths to be used in the loop
+MARKDUP_DIR="/parallel_scratch/lw01165/03_Mapping/3a_markdup"
+VAR_DIR="/parallel_scratch/lw01165/04_Variants"
+REF="/parallel_scratch/lw01165/01_Reference/Ascaris_primary_scaffolds_plus_X.fasta"
+SAMPLES="/parallel_scratch/lw01165/03_Mapping/Sample_list.txt"
+
+# Get sample name from array index
+SAMPLE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$SAMPLES")
+
+# Input/output
+IN_BAM="${MARKDUP_DIR}/${SAMPLE}.markdup.bam"
+OUT_GVCF="${VAR_DIR}/${SAMPLE}.g.vcf.gz"
+
+# Run gVCF calling
+gatk HaplotypeCaller \
+    --emit-ref-confidence GVCF \
+    -I "$IN_BAM" \
+    -R "$REF" \
+    -O "$OUT_GVCF"
+
+# Combine
