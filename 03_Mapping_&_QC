@@ -1,22 +1,12 @@
-#!/bin/bash
-#SBATCH --job-name=bwa_map
-#SBATCH --partition=shared
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=48:00:00
-#SBATCH --array=1-999%6
-#SBATCH --output=/parallel_scratch/lw01165/03_Mapping/logs/bwa_%A_%a.out
-#SBATCH --error=/parallel_scratch/lw01165/03_Mapping/logs/bwa_%A_%a.err
+## Mapping, Markduplicates and QC
+## Mapping
 
-set -euo pipefail
+# Make a directory and load the correct conda environment 
 
-# -------- env --------
-source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+mkdir 03_Mapping
 conda activate BWA
-command -v bwa >/dev/null || { echo "bwa not found"; exit 1; }
-command -v samtools >/dev/null || { echo "samtools not found"; exit 1; }
 
-# -------- paths --------
+# Create a path list
 REF="/parallel_scratch/lw01165/01_Reference/Ascaris_primary_scaffolds_plus_X.fasta"
 READS_DIR="/parallel_scratch/lw01165/02_Samples/samples_fastp"
 OUT_DIR="/parallel_scratch/lw01165/03_Mapping"
@@ -28,7 +18,7 @@ SAMPLE_LIST="${READS_DIR}/mapped.ids.txt"
 
 mkdir -p "$OUT_DIR" "$QC_DIR" "$LOGDIR" "$TMPDIR"
 
-# -------- index checks (do NOT build here) --------
+# -------- index checks  --------
 for ext in amb ann bwt pac sa; do
   [[ -s "${REF}.${ext}" ]] || { echo "❌ Missing BWA index: ${REF}.${ext}"; exit 1; }
 done
@@ -55,7 +45,7 @@ fi
 THREADS="${SLURM_CPUS_PER_TASK:-8}"
 SORT_MEM="4G"
 
-# -------- RG / PU from header (best effort) --------
+# -------- RG / PU from header --------
 HEADER="$(zcat "$R1" | head -n1 || true)"
 FLOWCELL="$(awk -F':' '{if(NF>=3) print $3}' <<<"$HEADER")"
 LANE="$(awk -F':' '{if(NF>=4) print $4}' <<<"$HEADER")"
@@ -73,6 +63,59 @@ bwa mem -t "$THREADS" \
 
 samtools index -@ "$THREADS" "$BAM"
 samtools flagstat "$BAM" > "${QC_DIR}/${SAMPLE}.flagstat.txt"
+
+echo "==> $(date) Done $SAMPLE"
+
+## Mark Duplicates using gatk/picard tools 
+
+# Make a new directory and load the correct conda environment 
+
+conda activate tools_env
+mkdir 3a_markdup # ("/parallel_scratch/lw01165/03_Mapping/3a_markdup")
+
+command -v gatk >/dev/null || { echo "❌ gatk not found in tools_env"; exit 1; }
+command -v samtools >/dev/null || { echo "❌ samtools not found in tools_env"; exit 1; }
+
+# -------- paths --------
+MAP_DIR="/parallel_scratch/lw01165/03_Mapping"
+MARKDUP_DIR="${MAP_DIR}/3a_markdup"
+LOGDIR="${MARKDUP_DIR}/logs"
+SAMPLE_LIST="${MAP_DIR}/Sample_list.txt"
+
+# -------- pick sample from array --------
+[[ -s "$SAMPLE_LIST" ]] || { echo "❌ Missing sample list: $SAMPLE_LIST"; exit 1; }
+
+SAMPLE="$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$SAMPLE_LIST" | tr -d '\r' | sed 's/[[:space:]]*$//')"
+[[ -n "${SAMPLE:-}" ]] || { echo "No sample for task ${SLURM_ARRAY_TASK_ID}"; exit 0; }
+
+# Per-sample logs with ID in the name
+exec >"${LOGDIR}/${SAMPLE}.markdup.out" 2>"${LOGDIR}/${SAMPLE}.markdup.err"
+
+IN_BAM="${MAP_DIR}/${SAMPLE}.bam"
+OUT_BAM="${MARKDUP_DIR}/${SAMPLE}.markdup.bam"
+METRICS="${MARKDUP_DIR}/${SAMPLE}.metrics.txt"
+
+[[ -s "$IN_BAM" ]] || { echo "❌ Input BAM not found for $SAMPLE: $IN_BAM"; exit 1; }
+
+# -------- skip if done --------
+if [[ -s "$OUT_BAM" && -s "${OUT_BAM}.bai" ]]; then
+  echo "✅ $SAMPLE markdup BAM+BAI already exist — skipping"
+  exit 0
+fi
+
+THREADS="${SLURM_CPUS_PER_TASK:-4}"
+
+echo "==> $(date) MarkDuplicates for $SAMPLE on $(hostname) (threads=$THREADS)"
+
+# -------- MarkDuplicates --------
+gatk MarkDuplicates \
+  --INPUT "$IN_BAM" \
+  --OUTPUT "$OUT_BAM" \
+  --METRICS_FILE "$METRICS" \
+  --VALIDATION_STRINGENCY LENIENT
+
+# -------- index markdup BAM --------
+samtools index -@ "$THREADS" "$OUT_BAM"
 
 echo "==> $(date) Done $SAMPLE"
 
