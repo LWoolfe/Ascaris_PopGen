@@ -1,0 +1,374 @@
+#---------------------------------------------------------------------
+### 1. Sample level sequening depth and breadth
+#---------------------------------------------------------------------
+library(data.table)
+library(ggplot2)
+library(scales)
+library(ggrepel)
+
+# Load + type cleanup
+qc <- fread("sample_mapping_stats.txt")
+
+qc[, median_depth := as.numeric(median_depth)]
+qc[, breadth      := as.numeric(breadth)]
+qc[, median_MAPQ  := as.numeric(median_MAPQ)]
+-
+# Cutoffs (final)
+depth_cutoff   <- 5
+breadth_cutoff <- 0.85
+
+qc[, fail_depth   := median_depth < depth_cutoff]
+qc[, fail_breadth := breadth < breadth_cutoff]
+
+# Failure = fails BOTH cutoffs
+qc[, qc_class := fifelse(fail_depth & fail_breadth, "Failure", "Keep")]
+qc[, qc_class := factor(qc_class, levels = c("Keep", "Failure"))]
+
+# Score for borderline ranking (used only to *identify* Watch)
+qc[, depth_log10 := log10(pmax(median_depth, 1e-6))]
+qc[, score := breadth + depth_log10]   # lower = worse
+
+# Initial Watch selection (borderline retained samples)
+n_watch_seed <- 3
+watch_seed <- qc[qc_class == "Keep"][order(score)][
+  1:min(.N, n_watch_seed), sample
+]
+-
+# Plot classification 
+qc[, qc_class_plot := "Keep"]
+qc[sample %in% watch_seed, qc_class_plot := "Watch"]
+qc[qc_class == "Failure",  qc_class_plot := "Failure"]
+
+# OPTION A:
+# Any sample exactly on a cutoff is promoted to Watch
+qc[breadth == breadth_cutoff | median_depth == depth_cutoff,
+   qc_class_plot := "Watch"]
+
+qc[, qc_class_plot := factor(
+  qc_class_plot,
+  levels = c("Keep", "Watch", "Failure")
+)]
+
+# Write outputs
+fwrite(qc, "Table_S1_mapping_QC.csv")
+
+fwrite(
+  qc[qc_class_plot == "Failure",
+     .(sample, breadth, median_depth, median_MAPQ,
+       fail_breadth, fail_depth, score)],
+  "failure_samples.csv"
+)
+
+fwrite(
+  qc[qc_class_plot == "Watch",
+     .(sample, breadth, median_depth, median_MAPQ,
+       fail_breadth, fail_depth, score)],
+  "watch_samples.csv"
+)
+
+qc_kept <- qc[qc_class_plot != "Failure"]
+fwrite(qc_kept, "mapping_QC_excluding_failures.csv")
+
+# Build legend labels from ACTUAL plotted classes
+legend_labels_dt <- qc[, .(
+  samples = paste(sample, collapse = ", "),
+  n = .N
+), by = qc_class_plot]
+
+legend_labels <- setNames(
+  paste0(
+    legend_labels_dt$qc_class_plot,
+    " (n=", legend_labels_dt$n, ")",
+    ifelse(
+      legend_labels_dt$qc_class_plot == "Keep",
+      "",
+      paste0(": ", legend_labels_dt$samples)
+    )
+  ),
+  legend_labels_dt$qc_class_plot
+)
+
+qc_cols <- c(
+  "Keep"    = "#1B9E77",
+  "Watch"   = "#7570B3",
+  "Failure" = "darkred"
+)
+
+p1 <- ggplot(qc, aes(x = breadth, y = median_depth, colour = qc_class_plot)) +
+  
+  # Points
+  geom_point(
+    data = qc[qc_class_plot == "Keep"],
+    alpha = 0.85, size = 2
+  ) +
+  
+  geom_point(
+    data = qc[qc_class_plot == "Watch"],
+    alpha = 1, size = 2.6
+  ) +
+  
+  geom_point(
+    data = qc[qc_class_plot == "Failure"],
+    alpha = 0.9, size = 2.6
+  ) +
+  
+  # Cutoff lines
+  geom_vline(
+    xintercept = breadth_cutoff,
+    linetype = "dashed", linewidth = 0.3, colour = "grey70"
+  ) +
+  
+  geom_hline(
+    yintercept = depth_cutoff,
+    linetype = "dashed", linewidth = 0.3, colour = "grey70"
+  ) +
+  
+  # Colour scale with sample lists in legend
+  scale_colour_manual(
+    values = qc_cols,
+    labels = legend_labels,
+    drop = FALSE
+  ) +
+  
+  # Y axis (log scale)
+  scale_y_log10(
+    limits = c(0.6, NA),
+    breaks = c(1, 2, 5, 10, 20, 50, 100, 200),
+    labels = scales::label_number()
+  ) +
+  
+  # X axis (zoomed to data range)
+  scale_x_continuous(
+    breaks = seq(0.5, 1, by = 0.1),
+    labels = scales::label_number(accuracy = 0.01)
+  ) +
+  
+  coord_cartesian(xlim = c(0.45, 1)) +
+  
+  # Labels (RESTORED)
+  labs(
+    x = "Breadth of coverage",
+    y = "Median depth (×, log10 scale)",
+    colour = NULL,
+    title = "Sample-level sequencing depth and breadth"
+    ) +
+  
+  # Theme
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 9),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    
+    # 🔑 THIS prevents right-side clipping of the legend
+    plot.margin = margin(t = 5.5, r = 45, b = 5.5, l = 5.5)
+  )
+
+
+plot(p1)
+
+# Save outputs
+ggsave("Fig_QC_depth_breadth.pdf", p1, width = 7, height = 4.5, useDingbats = FALSE)
+ggsave("Fig_QC_depth_breadth.png", p1, width = 7, height = 4.5, dpi = 600)
+
+# Save high-resolution TIFF for publication
+ggsave(
+  "Fig_QC_depth_breadth.tiff",
+  plot = p1,
+  device = "tiff",
+  width = 11,
+  height = 5,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  type = "cairo"
+)
+
+# Summary stats
+summary_stats <- qc[, .(
+  n_samples = .N,
+  n_keep    = sum(qc_class_plot == "Keep"),
+  n_watch   = sum(qc_class_plot == "Watch"),
+  n_failure = sum(qc_class_plot == "Failure"),
+  median_MAPQ    = median(median_MAPQ, na.rm = TRUE),
+  median_breadth = median(breadth, na.rm = TRUE),
+  median_depth   = median(median_depth, na.rm = TRUE),
+  depth_range    = paste0(
+    min(median_depth, na.rm = TRUE),
+    "–",
+    max(median_depth, na.rm = TRUE)
+  )
+)]
+
+summary_stats
+
+#-------------------------------------------------------------------------
+### 2. GENOME-WIDE COVERAGE HETEROGENEITY 
+#-------------------------------------------------------------------------
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+  library(scales)
+  library(patchwork)
+})
+
+win_file <- "all_samples_25kb_coverage.tsv"
+
+BREADTH_LIM    <- c(0.90, 1.00)
+BREADTH_BREAKS <- seq(BREADTH_LIM[1], BREADTH_LIM[2], by = 0.02)
+
+DEPTH_LIM <- NULL
+IQR_BAR_WIDTH <- 0.15
+
+USE_CHR_LABELS <- TRUE
+
+chrom_map <- c(
+  "CM024168.1"="1",  "CM024169.1"="2",  "CM024170.1"="3",
+  "CM024171.1"="4",  "CM024172.1"="5",  "CM024173.1"="6",
+  "CM024174.1"="7",  "CM024175.1"="8",  "CM024176.1"="9",
+  "CM024177.1"="10", "CM024178.1"="11", "CM024179.1"="12",
+  "CM024180.1"="13", "CM024181.1"="14", "CM024182.1"="15",
+  "CM024183.1"="16", "CM024184.1"="17", "CM024185.1"="18",
+  "CM024186.1"="19",
+  "CM024187.1"="X1", "CM024188.1"="X2", "CM024189.1"="X3",
+  "CM024190.1"="X4", "CM024191.1"="X5"
+)
+
+# The exact order you want to see on the y-axis (after coord_flip)
+chrom_levels_plot <- c(as.character(1:19), "X1","X2","X3","X4","X5")
+
+# ----------------------------
+# Read data
+# ----------------------------
+win <- fread(win_file)
+stopifnot(all(c(
+  "chrom","start","end","depth_sum","bases_covered","window_length","fraction_covered","sample"
+) %in% names(win)))
+
+setnames(win, "fraction_covered", "breadth")
+
+win[, `:=`(
+  chrom         = as.character(chrom),
+  sample        = as.character(sample),
+  start         = as.integer(start),
+  end           = as.integer(end),
+  depth_sum     = as.numeric(depth_sum),
+  bases_covered = as.numeric(bases_covered),
+  window_length = as.numeric(window_length),
+  breadth       = as.numeric(breadth)
+)]
+
+win[, mean_depth := depth_sum / window_length]
+
+# Label chromosomes
+if (USE_CHR_LABELS) {
+  win[, chrom_label := chrom_map[chrom]]
+  win[is.na(chrom_label), chrom_label := chrom]  # fallback
+} else {
+  win[, chrom_label := chrom]
+}
+
+# CRITICAL: make chrom_label a factor in the exact desired order
+# (Any values not in chrom_levels_plot are appended at the end to avoid NA levels)
+extra_levels <- setdiff(unique(win$chrom_label), chrom_levels_plot)
+final_levels <- c(chrom_levels_plot, extra_levels)
+win[, chrom_label := factor(chrom_label, levels = final_levels)]
+
+# ----------------------------
+# Per-chromosome summaries
+# ----------------------------
+chr_breadth <- win[, .(
+  n_windows      = .N,
+  q25_breadth    = as.numeric(quantile(breadth, 0.25, na.rm = TRUE)),
+  median_breadth = median(breadth, na.rm = TRUE),
+  q75_breadth    = as.numeric(quantile(breadth, 0.75, na.rm = TRUE)),
+  iqr_breadth    = IQR(breadth, na.rm = TRUE)
+), by = .(chrom_label)]
+
+chr_depth <- win[, .(
+  n_windows     = .N,
+  q25_depth     = as.numeric(quantile(mean_depth, 0.25, na.rm = TRUE)),
+  median_depth  = median(mean_depth, na.rm = TRUE),
+  q75_depth     = as.numeric(quantile(mean_depth, 0.75, na.rm = TRUE)),
+  iqr_depth     = IQR(mean_depth, na.rm = TRUE)
+), by = .(chrom_label)]
+
+# CRITICAL: enforce factor levels again after aggregation
+chr_breadth[, chrom_label := factor(as.character(chrom_label), levels = final_levels)]
+chr_depth[,   chrom_label := factor(as.character(chrom_label), levels = final_levels)]
+setorder(chr_breadth, chrom_label)
+setorder(chr_depth, chrom_label)
+
+# Write TSVs
+fwrite(chr_breadth, "per_chromosome_25kb_breadth_summary.tsv", sep = "\t")
+fwrite(chr_depth,   "per_chromosome_25kb_depth_summary.tsv", sep = "\t")
+
+# ----------------------------
+# Plot A: breadth (median + IQR)
+# ----------------------------
+p2_breadth <- ggplot(chr_breadth, aes(x = chrom_label, y = median_breadth)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = q25_breadth, ymax = q75_breadth), width = IQR_BAR_WIDTH) +
+  coord_flip() +
+  scale_x_discrete(limits = rev(levels(chr_breadth$chrom_label))) +
+  scale_y_continuous(limits = BREADTH_LIM, breaks = BREADTH_BREAKS, oob = squish) +
+  labs(
+    x = NULL,
+    y = "Breadth",
+    title = "A. Per-chromosome breadth (25 kb windows)",
+    subtitle = "Point = median; bar = IQR (Q1–Q3)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+# ----------------------------
+# Plot B: depth (median + IQR)
+# ----------------------------
+p2_depth <- ggplot(chr_depth, aes(x = chrom_label, y = median_depth)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = q25_depth, ymax = q75_depth), width = IQR_BAR_WIDTH) +
+  coord_flip() +
+  scale_x_discrete(limits = rev(levels(chr_depth$chrom_label))) +
+  {
+    if (is.null(DEPTH_LIM)) scale_y_continuous()
+    else scale_y_continuous(limits = DEPTH_LIM)
+  } +
+  labs(
+    x = "Chromosome",
+    y = "Mean depth per 25 kb window",
+    title = "B. Per-chromosome depth (25 kb windows)",
+    subtitle = "Point = median; bar = IQR (Q1–Q3)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+# Save individual panels
+ggsave("Figure2A_breadth_median_IQR.pdf", p2_breadth, width = 7, height = 8)
+ggsave("Figure2A_breadth_median_IQR.png", p2_breadth, width = 7, height = 8, dpi = 300)
+
+ggsave("Figure2B_depth_median_IQR.pdf", p2_depth, width = 7, height = 8)
+ggsave("Figure2B_depth_median_IQR.png", p2_depth, width = 7, height = 8, dpi = 300)
+
+# Combined figure
+p2_main <- p2_breadth / p2_depth +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(
+    title = "Genome-wide coverage heterogeneity (25 kb windows)",
+    theme = theme(plot.title = element_text(face = "bold", size = 14, hjust = 0))
+  )
+
+ggsave("Figure2_main_breadth_and_depth.pdf", p2_main, width = 8.5, height = 11)
+ggsave("Figure2_main_breadth_and_depth.png", p2_main, width = 8.5, height = 11, dpi = 300)
+
+print(p2_main)
+
+cat("\nDone.\n")
