@@ -1,0 +1,212 @@
+### This code edits the reference genome and creates a uniquely mapability index using GenMapper 
+
+# ------------------------------------------------------------------------
+# 1. Editing of the A. suum reference genome to remove unmapped contigs/scaffolds 
+# ------------------------------------------------------------------------
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ============================================================
+# Build primary-chromosome FASTA for Ascaris suum (ASM1343314v1)
+# Source: NCBI assembly ASM1343314v1 (GCA_013433314.1)
+#
+# Keeps only:
+#   - Chr1–Chr19 (CM024168.1–CM024186.1)
+#   - Sex chromosomes X1–X5 (CM024187.1–CM024191.1)
+#
+# QC:
+#   - Reports chromosome sizes (bp) from source FASTA
+#   - Verifies extracted FASTA has identical sizes
+#
+# Output:
+#   - Ascaris_primary_scaffolds_plus_X.fasta
+#   - primary_chromosomes.txt
+# ============================================================
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+REF_FASTA="${1:-GCA_013433314.1_ASM1343314v1_genomic.fna}"
+OUT_FASTA="Ascaris_primary_scaffolds_plus_X.fasta"
+CHR_LIST="primary_chromosomes.txt"
+
+# -----------------------------
+# DEPENDENCIES
+# -----------------------------
+need() { command -v "$1" >/dev/null 2>&1 || { echo "❌ Missing dependency: $1" >&2; exit 1; }; }
+need samtools
+need awk
+
+if [[ ! -f "$REF_FASTA" ]]; then
+  echo "❌ Reference FASTA not found: $REF_FASTA" >&2
+  echo "Usage: $0 /path/to/GCA_013433314.1_ASM1343314v1_genomic.fna[.gz]" >&2
+  exit 1
+fi
+
+# -----------------------------
+# CHROMOSOME LIST
+# -----------------------------
+cat > "$CHR_LIST" <<'EOF'
+CM024168.1
+CM024169.1
+CM024170.1
+CM024171.1
+CM024172.1
+CM024173.1
+CM024174.1
+CM024175.1
+CM024176.1
+CM024177.1
+CM024178.1
+CM024179.1
+CM024180.1
+CM024181.1
+CM024182.1
+CM024183.1
+CM024184.1
+CM024185.1
+CM024186.1
+CM024187.1
+CM024188.1
+CM024189.1
+CM024190.1
+CM024191.1
+EOF
+
+echo "🧾 Chromosome list written (${CHR_LIST})"
+
+# -----------------------------
+# INDEX SOURCE FASTA
+# -----------------------------
+echo "📇 Indexing source FASTA..."
+samtools faidx "$REF_FASTA"
+
+# -----------------------------
+# QC 1: SOURCE CHROMOSOME SIZES
+# -----------------------------
+echo "📊 QC: chromosome sizes in source FASTA"
+awk 'NR==FNR{keep[$1]; next} $1 in keep {printf "%s\t%d\n",$1,$2}' \
+  "$CHR_LIST" "${REF_FASTA}.fai" | tee source_chromosome_sizes.tsv
+
+N_SRC=$(wc -l < source_chromosome_sizes.tsv)
+if [[ "$N_SRC" -ne 24 ]]; then
+  echo "❌ Expected 24 chromosomes in source FASTA, found $N_SRC" >&2
+  exit 1
+fi
+
+# -----------------------------
+# EXTRACT PRIMARY CHROMOSOMES
+# -----------------------------
+echo "🧬 Extracting primary chromosomes → $OUT_FASTA"
+# shellcheck disable=SC2046
+samtools faidx "$REF_FASTA" $(cat "$CHR_LIST") > "$OUT_FASTA"
+
+# -----------------------------
+# INDEX OUTPUT FASTA
+# -----------------------------
+samtools faidx "$OUT_FASTA"
+
+# -----------------------------
+# QC 2: OUTPUT CHROMOSOME SIZES
+# -----------------------------
+echo "📊 QC: chromosome sizes in extracted FASTA"
+awk '{printf "%s\t%d\n",$1,$2}' "${OUT_FASTA}.fai" | tee extracted_chromosome_sizes.tsv
+
+# -----------------------------
+# QC 3: SIZE CONSISTENCY CHECK
+# -----------------------------
+echo "🔍 QC: verifying size consistency"
+join -t $'\t' \
+  <(sort source_chromosome_sizes.tsv) \
+  <(sort extracted_chromosome_sizes.tsv) \
+| awk -F'\t' '
+  {
+    if ($2 != $3) {
+      printf "❌ Size mismatch: %s source=%d extracted=%d\n",$1,$2,$3
+      exit 1
+    }
+  }
+  END { print "✅ All chromosome sizes match exactly." }
+'
+
+# -----------------------------
+# FINAL CHECK
+# -----------------------------
+N_SEQ=$(grep -c "^>" "$OUT_FASTA")
+[[ "$N_SEQ" -eq 24 ]] || { echo "❌ Output FASTA contains $N_SEQ sequences (expected 24)" >&2; exit 1; }
+
+echo "✅ Done."
+echo " - Output FASTA: $OUT_FASTA"
+echo " - Source sizes: source_chromosome_sizes.tsv"
+echo " - Extracted sizes: extracted_chromosome_sizes.tsv"
+
+# ------------------------------------------------------------------------
+## 2. Creating the Uniquely Mappable data using the reference and QC. 
+# ------------------------------------------------------------------------
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+REF="Ascaris_primary_scaffolds_plus_X.fasta"   # reference FASTA
+K=35                                          # k-mer length
+MISMATCH=1                                    # allowed mismatches
+INDEX_DIR="genmap_index"
+OUT_DIR="genmap_out"
+PREFIX="${OUT_DIR}/genmap"
+
+# Outputs
+UNIQUE_BG="mappability_unique_K${K}.bedgraph"
+UNIQUE_BED="mappability_unique_K${K}.bed"
+
+# -----------------------------
+# STEP 1: Index genome
+# -----------------------------
+echo "📇 Indexing reference for GenMap..."
+genmap index -F "$REF" -I "$INDEX_DIR"
+
+# -----------------------------
+# STEP 2: Compute mappability
+# -----------------------------
+echo "🧩 Computing mappability (K=${K}, mismatches=${MISMATCH})..."
+mkdir -p "$OUT_DIR"
+genmap map -K "$K" -E "$MISMATCH" -I "$INDEX_DIR" -O "$PREFIX" -bg
+
+# -----------------------------
+# STEP 3: Detect bedGraph output
+# -----------------------------
+BG_FILE="$(ls -1 "${PREFIX}"*.bedGraph "${PREFIX}"*.bedgraph 2>/dev/null | head -n 1 || true)"
+if [[ -z "${BG_FILE}" ]]; then
+  echo "❌ No bedGraph file found in ${OUT_DIR} (expected ${PREFIX}*.bedGraph)."
+  exit 1
+fi
+echo "📄 Using bedGraph: ${BG_FILE}"
+
+# -----------------------------
+# STEP 4: Extract uniquely mappable regions (score == 1)
+# -----------------------------
+echo "📜 Extracting uniquely mappable regions (score=1)..."
+awk '$4 == 1 {print $0}' "$BG_FILE" > "$UNIQUE_BG"
+
+# -----------------------------
+# STEP 5: Convert bedGraph → BED (chr, start, end)
+# -----------------------------
+echo "🔄 Converting to BED..."
+awk 'BEGIN{OFS="\t"} {print $1,$2,$3}' "$UNIQUE_BG" > "$UNIQUE_BED"
+
+# -----------------------------
+# STEP 6: Summary statistics
+# -----------------------------
+echo "📊 Summary statistics:"
+GENOME_SIZE="$(awk '{sum += ($3 - $2)} END {print sum+0}' "$BG_FILE")"
+UNIQUE_SIZE="$(awk '{sum += ($3 - $2)} END {print sum+0}' "$UNIQUE_BG")"
+PCT="$(awk -v u="$UNIQUE_SIZE" -v g="$GENOME_SIZE" 'BEGIN {if (g>0) printf "%.2f", (u/g)*100; else print "0.00"}')"
+
+echo "Genome size (covered by bedGraph): ${GENOME_SIZE} bp"
+echo "Uniquely mappable (score=1):       ${UNIQUE_SIZE} bp (${PCT}%)"
+echo "✅ Done."
+echo " - Unique bedGraph: ${UNIQUE_BG}"
+echo " - Unique BED:      ${UNIQUE_BED}"
