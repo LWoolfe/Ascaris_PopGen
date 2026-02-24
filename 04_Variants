@@ -1,27 +1,283 @@
-## Initial Variant calling to create gVCF files. 
-
-#create a new directory and load the correct cobda environment
-mkdir 04_Variants
-conda activate Gatk4
-
-#create a list of paths to be used in the loop
+#---------------------------------------------------------------------
+# 0) Setup paths + output folders
+#---------------------------------------------------------------------
+WORKDIR="/parallel_scratch/lw01165/04_Variants"
 MARKDUP_DIR="/parallel_scratch/lw01165/03_Mapping/3a_markdup"
-VAR_DIR="/parallel_scratch/lw01165/04_Variants"
 REF="/parallel_scratch/lw01165/01_Reference/Ascaris_primary_scaffolds_plus_X.fasta"
 SAMPLES="/parallel_scratch/lw01165/03_Mapping/Sample_list.txt"
 
-# Get sample name from array index
-SAMPLE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$SAMPLES")
+GVCF_DIR="${WORKDIR}/04a_gvcf"
+MERGE_DIR="${WORKDIR}/04a_merged"
+QC_DIR="${WORKDIR}/04b_qc"
 
-# Input/output
-IN_BAM="${MARKDUP_DIR}/${SAMPLE}.markdup.bam"
-OUT_GVCF="${VAR_DIR}/${SAMPLE}.g.vcf.gz"
+mkdir -p "${GVCF_DIR}" "${MERGE_DIR}" "${QC_DIR}"
 
-# Run gVCF calling
-gatk HaplotypeCaller \
-    --emit-ref-confidence GVCF \
-    -I "$IN_BAM" \
-    -R "$REF" \
-    -O "$OUT_GVCF"
+#---------------------------------------------------------------------
+# 1) Reference prerequisites (run once)
+#---------------------------------------------------------------------
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate tools_env
 
-# Combine
+# FASTA index + sequence dictionary (required by many GATK tools)
+samtools faidx "${REF}"
+gatk CreateSequenceDictionary -R "${REF}"
+
+#---------------------------------------------------------------------
+# 2) Per-sample gVCF calling (run once per sample)
+#    (In practice you’ll parallelise this on HPC, but these are the plain commands.)
+#---------------------------------------------------------------------
+conda activate Gatk4
+
+while read -r SAMPLE; do
+  IN_BAM="${MARKDUP_DIR}/${SAMPLE}.markdup.bam"
+  OUT_GVCF="${GVCF_DIR}/${SAMPLE}.g.vcf.gz"
+
+  # Ensure BAM is indexed (skip if you already do this upstream)
+  [[ -f "${IN_BAM}.bai" ]] || samtools index "${IN_BAM}"
+
+  gatk HaplotypeCaller \
+    -R "${REF}" \
+    -I "${IN_BAM}" \
+    -O "${OUT_GVCF}" \
+    --emit-ref-confidence GVCF
+
+  gatk IndexFeatureFile -I "${OUT_GVCF}"
+done < "${SAMPLES}"
+
+#---------------------------------------------------------------------
+# 3) Combine gVCFs + joint genotype
+#---------------------------------------------------------------------
+conda activate tools_env
+
+# Build arguments file for CombineGVCFs (one -V per line)
+ls "${GVCF_DIR}"/*.g.vcf.gz | awk '{print "-V "$0}' > "${WORKDIR}/variantcall_sample_list.txt"
+
+JAVA_XMX="850g"
+TMPDIR="${MERGE_DIR}/tmp"
+mkdir -p "${TMPDIR}"
+
+gatk --java-options "-Xmx${JAVA_XMX}" CombineGVCFs \
+  -R "${REF}" \
+  --arguments_file "${WORKDIR}/variantcall_sample_list.txt" \
+  -O "${MERGE_DIR}/merged_all_samples.g.vcf.gz" \
+  --tmp-dir "${TMPDIR}"
+
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.g.vcf.gz"
+
+gatk --java-options "-Xmx${JAVA_XMX}" GenotypeGVCFs \
+  -R "${REF}" \
+  -V "${MERGE_DIR}/merged_all_samples.g.vcf.gz" \
+  -O "${MERGE_DIR}/merged_all_samples.vcf.gz" \
+  --tmp-dir "${TMPDIR}"
+
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.vcf.gz"
+
+#---------------------------------------------------------------------
+# 4) Split by variant type (SNP / INDEL / MIXED)
+#---------------------------------------------------------------------
+JAVA_XMX="100g"
+
+gatk --java-options "-Xmx${JAVA_XMX}" SelectVariants -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.vcf.gz" \
+  --select-type-to-include SNP   -O "${MERGE_DIR}/merged_all_samples.SNPs.vcf.gz"  --tmp-dir "${TMPDIR}"
+
+gatk --java-options "-Xmx${JAVA_XMX}" SelectVariants -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.vcf.gz" \
+  --select-type-to-include INDEL -O "${MERGE_DIR}/merged_all_samples.INDELs.vcf.gz" --tmp-dir "${TMPDIR}"
+
+gatk --java-options "-Xmx${JAVA_XMX}" SelectVariants -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.vcf.gz" \
+  --select-type-to-include MIXED -O "${MERGE_DIR}/merged_all_samples.MIXED.vcf.gz" --tmp-dir "${TMPDIR}"
+
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.SNPs.vcf.gz"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.INDELs.vcf.gz"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.MIXED.vcf.gz"
+
+#---------------------------------------------------------------------
+# 5) Tag low-quality sites + keep PASS only
+#---------------------------------------------------------------------
+JAVA_XMX="180g"
+
+# SNP hard filters
+gatk --java-options "-Xmx${JAVA_XMX}" VariantFiltration -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.SNPs.vcf.gz" \
+  -O "${MERGE_DIR}/merged_all_samples.SNPs.tagged.vcf.gz" \
+  --filter-name "QD2"  --filter-expression "QD < 2.0" \
+  --filter-name "FS30" --filter-expression "FS > 30.0" \
+  --filter-name "SOR3" --filter-expression "SOR > 3.0" \
+  --filter-name "MQ40" --filter-expression "MQ < 40.0" \
+  --tmp-dir "${TMPDIR}"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.SNPs.tagged.vcf.gz"
+
+gatk --java-options "-Xmx${JAVA_XMX}" SelectVariants -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.SNPs.tagged.vcf.gz" \
+  --exclude-filtered -O "${MERGE_DIR}/merged_all_samples.SNPs.filtered.vcf.gz"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.SNPs.filtered.vcf.gz"
+
+# INDEL hard filters
+gatk --java-options "-Xmx${JAVA_XMX}" VariantFiltration -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.INDELs.vcf.gz" \
+  -O "${MERGE_DIR}/merged_all_samples.INDELs.tagged.vcf.gz" \
+  --filter-name "QD2"  --filter-expression "QD < 2.0" \
+  --filter-name "FS50" --filter-expression "FS > 50.0" \
+  --filter-name "SOR5" --filter-expression "SOR > 5.0" \
+  --tmp-dir "${TMPDIR}"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.INDELs.tagged.vcf.gz"
+
+gatk --java-options "-Xmx${JAVA_XMX}" SelectVariants -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.INDELs.tagged.vcf.gz" \
+  --exclude-filtered -O "${MERGE_DIR}/merged_all_samples.INDELs.filtered.vcf.gz"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.INDELs.filtered.vcf.gz"
+
+# MIXED hard filters (treated like INDELs)
+gatk --java-options "-Xmx${JAVA_XMX}" VariantFiltration -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.MIXED.vcf.gz" \
+  -O "${MERGE_DIR}/merged_all_samples.MIXED.tagged.vcf.gz" \
+  --filter-name "QD2"  --filter-expression "QD < 2.0" \
+  --filter-name "FS50" --filter-expression "FS > 50.0" \
+  --filter-name "SOR5" --filter-expression "SOR > 5.0" \
+  --tmp-dir "${TMPDIR}"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.MIXED.tagged.vcf.gz"
+
+gatk --java-options "-Xmx${JAVA_XMX}" SelectVariants -R "${REF}" -V "${MERGE_DIR}/merged_all_samples.MIXED.tagged.vcf.gz" \
+  --exclude-filtered -O "${MERGE_DIR}/merged_all_samples.MIXED.filtered.vcf.gz"
+gatk IndexFeatureFile -I "${MERGE_DIR}/merged_all_samples.MIXED.filtered.vcf.gz"
+
+#---------------------------------------------------------------------
+# 6) Cohort QC table (site annotations)
+#---------------------------------------------------------------------
+gatk VariantsToTable \
+  -R "${REF}" \
+  -V "${MERGE_DIR}/merged_all_samples.vcf.gz" \
+  -O "${QC_DIR}/cohort.variant_qc.tsv" \
+  -F CHROM -F POS -F TYPE \
+  -F QUAL -F FILTER \
+  -F QD -F FS -F SOR -F MQ -F MQRankSum -F ReadPosRankSum \
+  --show-filtered true
+#---------------------------------------------------------------------
+# 7) Post-filter VCF QC (bcftools summaries + spot checks)
+#---------------------------------------------------------------------
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate tools_env
+
+WORKDIR="/parallel_scratch/lw01165/04_Variants/04a_merged"
+
+SNP_TAG="${WORKDIR}/merged_all_samples.SNPs.tagged.vcf.gz"
+INDEL_TAG="${WORKDIR}/merged_all_samples.INDELs.tagged.vcf.gz"
+MIXED_TAG="${WORKDIR}/merged_all_samples.MIXED.tagged.vcf.gz"
+
+SNP_FILT="${WORKDIR}/merged_all_samples.SNPs.filtered.vcf.gz"
+INDEL_FILT="${WORKDIR}/merged_all_samples.INDELs.filtered.vcf.gz"
+MIXED_FILT="${WORKDIR}/merged_all_samples.MIXED.filtered.vcf.gz"
+
+OUTDIR="${WORKDIR}/qc"
+mkdir -p "${OUTDIR}"
+
+# prereqs
+command -v bcftools >/dev/null 2>&1 || { echo "ERROR: bcftools not in PATH"; exit 1; }
+for f in "$SNP_TAG" "$INDEL_TAG" "$MIXED_TAG" "$SNP_FILT" "$INDEL_FILT" "$MIXED_FILT"; do
+  [[ -s "$f" ]] || { echo "ERROR: missing/empty file: $f"; exit 1; }
+done
+
+REPORT="${OUTDIR}/qc_report.$(date +%Y%m%d_%H%M%S).txt"
+exec > >(tee -a "${REPORT}") 2>&1
+
+echo "Started: $(date) on $(hostname)"
+echo "WORKDIR: ${WORKDIR}"
+echo "OUTDIR:  ${OUTDIR}"
+
+############################################
+# 7.1) FILTER breakdown in tagged VCFs
+############################################
+echo
+echo "### 7.1) FILTER breakdown in tagged VCFs"
+for v in SNPs INDELs MIXED; do
+  TAG="${WORKDIR}/merged_all_samples.${v}.tagged.vcf.gz"
+
+  echo
+  echo "== ${v} tagged: overall FILTER field counts =="
+  bcftools view -H "${TAG}" | awk '{c[$7]++} END{for(k in c) print k"\t"c[k]}' | sort -k2,2nr
+
+  echo
+  echo "== ${v} tagged: per-reason counts (splitting ';', excluding PASS) =="
+  bcftools query -f '%FILTER\n' "${TAG}" \
+    | tr ';' '\n' \
+    | awk '$1!="PASS" && $1!="." {c[$1]++} END{for(k in c) print k"\t"c[k]}' \
+    | sort -k2,2nr
+done
+
+############################################
+# 7.2) PASS-only verification + counts
+############################################
+echo
+echo "### 7.2) PASS-only verification + counts tagged vs filtered"
+for v in SNPs INDELs MIXED; do
+  TAG="${WORKDIR}/merged_all_samples.${v}.tagged.vcf.gz"
+  FILT="${WORKDIR}/merged_all_samples.${v}.filtered.vcf.gz"
+
+  echo
+  echo "== ${v} filtered: unique FILTER values (should be only PASS) =="
+  bcftools query -f '%FILTER\n' "${FILT}" | sort | uniq -c
+
+  echo
+  echo "== ${v} counts (records) tagged vs filtered =="
+  echo -n "tagged:   "; bcftools view -H "${TAG}"  | wc -l
+  echo -n "filtered: "; bcftools view -H "${FILT}" | wc -l
+done
+
+############################################
+# 7.3) Annotation presence (sample first 100k records)
+############################################
+echo
+echo "### 7.3) Annotation presence (QD/FS/SOR/MQ) in tagged VCFs (first 100k)"
+for v in SNPs INDELs MIXED; do
+  TAG="${WORKDIR}/merged_all_samples.${v}.tagged.vcf.gz"
+  echo
+  echo "== ${v} annotation presence =="
+  bcftools view -H -n 100000 "${TAG}" \
+    | awk '
+      {
+        info=$8
+        hasQD = (info ~ /(^|;)QD=/)
+        hasFS = (info ~ /(^|;)FS=/)
+        hasSOR= (info ~ /(^|;)SOR=/)
+        hasMQ = (info ~ /(^|;)MQ=/)
+        n++
+        qd+=hasQD; fs+=hasFS; sor+=hasSOR; mq+=hasMQ
+      }
+      END{
+        if(n==0){print "No records sampled"; exit}
+        printf("N=%d  QD:%0.3f  FS:%0.3f  SOR:%0.3f  MQ:%0.3f\n", n, qd/n, fs/n, sor/n, mq/n)
+      }'
+done
+
+############################################
+# 7.4) bcftools stats summaries (writes files)
+############################################
+echo
+echo "### 7.4) bcftools stats on filtered VCFs"
+for v in SNPs INDELs MIXED; do
+  FILT="${WORKDIR}/merged_all_samples.${v}.filtered.vcf.gz"
+  STATS_OUT="${OUTDIR}/merged_all_samples.${v}.filtered.stats.txt"
+  echo "Running: bcftools stats ${FILT} > ${STATS_OUT}"
+  bcftools stats -s - "${FILT}" > "${STATS_OUT}"
+
+  echo
+  echo "== ${v} key stats (SN/TSTV/SiS/ST lines) =="
+  grep -E '^(SN|TSTV|SiS|ST)\b' "${STATS_OUT}" | head -n 60 || true
+done
+
+############################################
+# 7.5) Spot-check filtered-out variants (first 50 non-PASS)
+############################################
+echo
+echo "### 7.5) Spot-check non-PASS records (first 50) with key annotations"
+for v in SNPs INDELs MIXED; do
+  TAG="${WORKDIR}/merged_all_samples.${v}.tagged.vcf.gz"
+  OUT="${OUTDIR}/merged_all_samples.${v}.tagged.nonPASS.sample.tsv"
+  echo
+  echo "== ${v} writing: ${OUT} =="
+  echo -e "CHROM\tPOS\tREF\tALT\tQD\tFS\tSOR\tMQ\tFILTER" > "${OUT}"
+  bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%QD\t%FS\t%SOR\t%MQ\t%FILTER\n' \
+    -i 'FILTER!="PASS" && FILTER!="."' "${TAG}" \
+    | head -n 50 >> "${OUT}" || true
+  head -n 6 "${OUT}"
+done
+
+echo
+echo "Finished: $(date)"
+echo "QC report: ${REPORT}"
+echo "Stats files: ${OUTDIR}/merged_all_samples.*.filtered.stats.txt"
+echo "NonPASS samples: ${OUTDIR}/merged_all_samples.*.tagged.nonPASS.sample.tsv"
