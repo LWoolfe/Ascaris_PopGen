@@ -724,3 +724,45 @@ done
 echo "Wrote: ${SITE_COUNT_TSV}"
 
 echo "Done."
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 0) Make all_samples.txt (if not already made)
+# bcftools query -l Ascaris.autosomes.SNPs.clean.vcf.gz > all_samples.txt
+
+# 1) Pull out SRR3 / SRR8 lists from all samples
+grep "^SRR3" all_samples.txt > all_SRR3.txt
+grep "^SRR8" all_samples.txt > all_SRR8.txt
+
+# 2) Remove all SRR3 and SRR8 from the full list
+grep -v -E "^SRR3|^SRR8" all_samples.txt > non_SRR38_samples.txt
+
+# 3) Make pools for random selection (exclude fixed keep IDs)
+grep -v -F -f keep_SRR3_fixed.txt all_SRR3.txt > SRR3_pool.txt
+grep -v -F -f keep_SRR8_fixed.txt all_SRR8.txt > SRR8_pool.txt
+
+# 4) Randomly sample from the pools (change seeds if you want different draws)
+shuf --random-source=<(yes 42) -n 10 SRR3_pool.txt > SRR3_random10.txt
+shuf --random-source=<(yes 84) -n 15 SRR8_pool.txt > SRR8_random15.txt
+
+# 5) Final SRR lists
+cat keep_SRR3_fixed.txt SRR3_random10.txt > final_SRR3_samples.txt
+cat keep_SRR8_fixed.txt SRR8_random15.txt > final_SRR8_samples.txt
+
+# 6) Final balanced sample list
+cat non_SRR38_samples.txt final_SRR3_samples.txt final_SRR8_samples.txt > balanced_samples.txt
+
+# 7) Sanity checks
+echo "Total samples in balanced_samples.txt:"
+wc -l balanced_samples.txt
+
+echo "SRR3 count:"
+grep "^SRR3" balanced_samples.txt | wc -l
+
+echo "SRR8 count:"
+grep "^SRR8" balanced_samples.txt | wc -l
+
+echo "Duplicate sample IDs (should be empty):"
+sort balanced_samples.txt | uniq -d || true
+
