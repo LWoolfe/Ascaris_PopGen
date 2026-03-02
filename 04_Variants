@@ -281,3 +281,446 @@ echo "Finished: $(date)"
 echo "QC report: ${REPORT}"
 echo "Stats files: ${OUTDIR}/merged_all_samples.*.filtered.stats.txt"
 echo "NonPASS samples: ${OUTDIR}/merged_all_samples.*.tagged.nonPASS.sample.tsv"
+
+##################
+#!/bin/bash
+#SBATCH --job-name=04c_uniquemap
+#SBATCH --partition=high_mem
+#SBATCH --output=/parallel_scratch/lw01165/04_Variants/04c_uniquemap.%j.out
+#SBATCH --error=/parallel_scratch/lw01165/04_Variants/04c_uniquemap.%j.err
+#SBATCH --time=3-00:00:00
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=150G
+
+set -eo pipefail
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate tools_env
+
+# Define paths
+REF=/parallel_scratch/lw01165/01_Reference/Ascaris_primary_scaffolds_plus_X.fasta
+WORKDIR=/parallel_scratch/lw01165/04_Variants/04a_merged
+OUTDIR=/parallel_scratch/lw01165/04_Variants/04c_uniquly_mappable_var
+BED=/parallel_scratch/lw01165/01_Reference/mappability_unique.merged.bed
+
+
+mkdir -p "${OUTDIR}"
+
+JAVA_OPTS="-Xmx130G -XX:ParallelGCThreads=20"
+
+############################
+# SNPs
+############################
+gatk --java-options "${JAVA_OPTS}" SelectVariants \
+  -R "${REF}" \
+  -V "${WORKDIR}/merged_all_samples.SNPs.tagged.vcf.gz" \
+  --exclude-filtered \
+  -L "${BED}" \
+  -O "${OUTDIR}/merged_all_samples.SNPs.filtered.uniquemap.vcf.gz"
+
+gatk IndexFeatureFile \
+  -I "${OUTDIR}/merged_all_samples.SNPs.filtered.uniquemap.vcf.gz"
+
+############################
+# INDELs
+############################
+gatk --java-options "${JAVA_OPTS}" SelectVariants \
+  -R "${REF}" \
+  -V "${WORKDIR}/merged_all_samples.INDELs.tagged.vcf.gz" \
+  --exclude-filtered \
+  -L "${BED}" \
+  -O "${OUTDIR}/merged_all_samples.INDELs.filtered.uniquemap.vcf.gz"
+
+gatk IndexFeatureFile \
+  -I "${OUTDIR}/merged_all_samples.INDELs.filtered.uniquemap.vcf.gz"
+
+############################
+# MIXED
+############################
+gatk --java-options "${JAVA_OPTS}" SelectVariants \
+  -R "${REF}" \
+  -V "${WORKDIR}/merged_all_samples.MIXED.tagged.vcf.gz" \
+  --exclude-filtered \
+  -L "${BED}" \
+  -O "${OUTDIR}/merged_all_samples.MIXED.filtered.uniquemap.vcf.gz"
+
+gatk IndexFeatureFile \
+  -I "${OUTDIR}/merged_all_samples.MIXED.filtered.uniquemap.vcf.gz"
+
+echo "Uniquely mappable intersection complete."
+#!/bin/bash
+#SBATCH --job-name=04c_qc_umap
+#SBATCH --partition=high_mem
+#SBATCH --output=/parallel_scratch/lw01165/04_Variants/04c_qc_umap.%j.out
+#SBATCH --error=/parallel_scratch/lw01165/04_Variants/04c_qc_umap.%j.err
+#SBATCH --time=04:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+
+set -eo pipefail
+
+# Helpful debugging if anything fails (prints failing line + command to .err)
+trap 'echo "ERROR on line $LINENO"; echo "Last command: $BASH_COMMAND" >&2' ERR
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate tools_env
+
+# FIXED: this should be the directory that actually contains the VCFs you listed
+WORKDIR=/parallel_scratch/lw01165/04_Variants/04a_merged
+
+# NOTE: keep your original spelling here; just make sure the directory really exists
+UMAPDIR=/parallel_scratch/lw01165/04_Variants/04c_uniquly_mappable_var
+
+OUTDIR=/parallel_scratch/lw01165/04_Variants/04c_uniquly_mappable_var/QC
+mkdir -p "${OUTDIR}"
+
+OUTTSV="${OUTDIR}/retention_summary.tsv"
+
+echo -e "TYPE\tSET\tRECORDS\tPASS\tNONPASS\tTSTV" > "${OUTTSV}"
+
+# Helper: write one line of summary for a VCF
+summarize_vcf () {
+  local type="$1"
+  local setname="$2"
+  local vcf="$3"
+  local do_tstv="$4"  # "yes" for SNP/MIXED, "no" for INDEL
+
+  # If missing/empty, write a placeholder row but don't crash the whole job
+  if [[ ! -s "${vcf}" ]]; then
+    echo "WARN: missing/empty VCF: ${vcf}" >&2
+    echo -e "${type}\t${setname}\t0\t0\t0\tNA" >> "${OUTTSV}"
+    return 0
+  fi
+
+  # total records
+  local records
+  records=$(bcftools view -H "${vcf}" | wc -l)
+
+  # PASS records (FILTER=PASS)
+  local pass
+  pass=$(bcftools view -f PASS -H "${vcf}" | wc -l)
+
+  # NONPASS = total - pass
+  local nonpass=$((records - pass))
+
+  # Ts/Tv (only meaningful for SNP/MIXED; bcftools stats reports it)
+  local tstv="NA"
+  if [[ "${do_tstv}" == "yes" ]]; then
+    # Best-effort: don't let bcftools stats failure kill the whole script
+    tstv=$(
+      bcftools stats -s - "${vcf}" 2>/dev/null \
+        | awk -F'\t' '$1=="TSTV"{print $3; exit}' \
+        || true
+    )
+    [[ -z "${tstv}" ]] && tstv="NA"
+  fi
+
+  echo -e "${type}\t${setname}\t${records}\t${pass}\t${nonpass}\t${tstv}" >> "${OUTTSV}"
+}
+
+############################
+# Input VCFs (in WORKDIR)
+############################
+SNP_TAGGED="${WORKDIR}/merged_all_samples.SNPs.tagged.vcf.gz"
+INDEL_TAGGED="${WORKDIR}/merged_all_samples.INDELs.tagged.vcf.gz"
+MIXED_TAGGED="${WORKDIR}/merged_all_samples.MIXED.tagged.vcf.gz"
+
+# Filtered files (if present)
+SNP_FILTERED="${WORKDIR}/merged_all_samples.SNPs.filtered.vcf.gz"
+INDEL_FILTERED="${WORKDIR}/merged_all_samples.INDELs.filtered.vcf.gz"
+MIXED_FILTERED="${WORKDIR}/merged_all_samples.MIXED.filtered.vcf.gz"
+
+# Uniquemap outputs
+SNP_UMAP="${UMAPDIR}/merged_all_samples.SNPs.filtered.uniquemap.vcf.gz"
+INDEL_UMAP="${UMAPDIR}/merged_all_samples.INDELs.filtered.uniquemap.vcf.gz"
+MIXED_UMAP="${UMAPDIR}/merged_all_samples.MIXED.filtered.uniquemap.vcf.gz"
+
+############################
+# Sanity checks (fail fast with clear messages)
+############################
+echo "Checking presence of key inputs..." >&2
+ls -lh "${SNP_TAGGED}" "${INDEL_TAGGED}" "${MIXED_TAGGED}" >&2
+# Uniquemap files might legitimately be missing if that step hasn't run;
+# we don't hard-fail here because summarize_vcf will emit WARN rows.
+ls -lh "${SNP_UMAP}" "${INDEL_UMAP}" "${MIXED_UMAP}" >&2 || true
+
+############################
+# Summaries
+############################
+
+# TAGGED
+summarize_vcf "SNPs"   "tagged"    "${SNP_TAGGED}"   "yes"
+summarize_vcf "INDELs" "tagged"    "${INDEL_TAGGED}" "no"
+summarize_vcf "MIXED"  "tagged"    "${MIXED_TAGGED}" "yes"
+
+# FILTERED (PASS-only)
+# If the *.filtered.vcf.gz files do not exist, compute filtered counts as PASS-only from the tagged file.
+filtered_from_tagged () {
+  local type="$1"
+  local tagged="$2"
+  local do_tstv="$3"
+
+  local pass
+  pass=$(bcftools view -f PASS -H "${tagged}" | wc -l)
+
+  local tstv="NA"
+  if [[ "${do_tstv}" == "yes" ]]; then
+    tstv=$(
+      bcftools stats -s - "${tagged}" 2>/dev/null \
+        | awk -F'\t' '$1=="TSTV"{print $3; exit}' \
+        || true
+    )
+    [[ -z "${tstv}" ]] && tstv="NA"
+  fi
+
+  # filtered set: records=PASS, pass=PASS, nonpass=0
+  echo -e "${type}\tfiltered\t${pass}\t${pass}\t0\t${tstv}" >> "${OUTTSV}"
+}
+
+if [[ -f "${SNP_FILTERED}" ]]; then
+  summarize_vcf "SNPs"   "filtered" "${SNP_FILTERED}"   "yes"
+else
+  filtered_from_tagged "SNPs" "${SNP_TAGGED}" "yes"
+fi
+
+if [[ -f "${INDEL_FILTERED}" ]]; then
+  summarize_vcf "INDELs" "filtered" "${INDEL_FILTERED}" "no"
+else
+  filtered_from_tagged "INDELs" "${INDEL_TAGGED}" "no"
+fi
+
+if [[ -f "${MIXED_FILTERED}" ]]; then
+  summarize_vcf "MIXED"  "filtered" "${MIXED_FILTERED}" "yes"
+else
+  filtered_from_tagged "MIXED" "${MIXED_TAGGED}" "yes"
+fi
+
+# UNIQUEMAP (already PASS-only by construction, but we still count PASS for consistency)
+summarize_vcf "SNPs"   "uniquemap" "${SNP_UMAP}"   "yes"
+summarize_vcf "INDELs" "uniquemap" "${INDEL_UMAP}" "no"
+summarize_vcf "MIXED"  "uniquemap" "${MIXED_UMAP}" "yes"
+
+echo "Done. Wrote: ${OUTTSV}"
+#!/bin/bash
+#SBATCH --job-name=sampleQC
+#SBATCH --partition=high_mem
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=60G
+#SBATCH --time=24:00:00
+#SBATCH --output=sampleQC.%j.out
+#SBATCH --error=sampleQC.%j.err
+
+set -eo pipefail
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate tools_env
+
+WORKDIR=/parallel_scratch/lw01165/04_Variants
+INDIR=$WORKDIR/04c_uniquly_mappable_var
+OUTDIR=$WORKDIR/04d_sample_QC
+
+mkdir -p "$OUTDIR"
+cd "$OUTDIR"
+
+# 1) Create biallelic SNP QC dataset
+vcftools --gzvcf "$INDIR/merged_all_samples.SNPs.filtered.uniquemap.vcf.gz" \
+  --min-alleles 2 --max-alleles 2 \
+  --recode --recode-INFO-all \
+  --out SNPs.QCset
+
+# 2) Per-individual missingness
+vcftools --vcf SNPs.QCset.recode.vcf \
+  --missing-indv \
+  --out SNPs.QCset
+
+# 3) Per-individual mean depth (low-cov sanity check)
+vcftools --vcf SNPs.QCset.recode.vcf \
+  --depth \
+  --out SNPs.QCset
+
+# 4) Heterozygosity / inbreeding coefficient
+vcftools --vcf SNPs.QCset.recode.vcf \
+  --het \
+  --out SNPs.QCset
+
+#!/bin/bash
+#SBATCH --job-name=split_auto_sex
+#SBATCH --partition=high_mem
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=80G
+#SBATCH --time=12:00:00
+#SBATCH --output=split_auto_sex.%j.out
+#SBATCH --error=split_auto_sex.%j.err
+
+set -eo pipefail
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate tools_env
+
+WORKDIR=/parallel_scratch/lw01165/04_Variants/04d_sample_QC
+cd $WORKDIR
+
+INPUT_VCF=SNPs.QCset.recode.vcf
+INPUT_GZ=SNPs.QCset.recode.vcf.gz
+
+echo "Checking compression..."
+
+# If gzipped file doesn't exist, bgzip it
+if [ ! -f "$INPUT_GZ" ]; then
+    echo "Compressing with bgzip..."
+    bgzip -@ 8 $INPUT_VCF
+fi
+
+# Index if index does not exist
+if [ ! -f "$INPUT_GZ.tbi" ]; then
+    echo "Indexing VCF..."
+    bcftools index -t $INPUT_GZ
+fi
+
+echo "Splitting autosomes..."
+
+bcftools view -Oz \
+  -r CM024168.1,CM024169.1,CM024170.1,CM024171.1,CM024172.1,CM024173.1,CM024174.1,CM024175.1,CM024176.1,CM024177.1,CM024178.1,CM024179.1,CM024180.1,CM024181.1,CM024182.1,CM024183.1,CM024184.1,CM024185.1,CM024186.1 \
+  $INPUT_GZ > SNPs.QCset.autosomes.vcf.gz
+
+bcftools index -t SNPs.QCset.autosomes.vcf.gz
+
+
+echo "Splitting sex chromosomes..."
+
+bcftools view -Oz \
+  -r CM024187.1,CM024188.1,CM024189.1,CM024190.1,CM024191.1 \
+  $INPUT_GZ > SNPs.QCset.sexchr.vcf.gz
+
+bcftools index -t SNPs.QCset.sexchr.vcf.gz
+
+
+echo "Recomputing QC metrics on autosomes..."
+
+vcftools --gzvcf SNPs.QCset.autosomes.vcf.gz --missing-indv --out SNPs.autosomes
+vcftools --gzvcf SNPs.QCset.autosomes.vcf.gz --depth       --out SNPs.autosomes
+vcftools --gzvcf SNPs.QCset.autosomes.vcf.gz --het         --out SNPs.autosomes
+
+echo "All done."
+
+# remove: F < -0.4
+awk 'NR>1 && $6 < -0.4 {print $1}' SNPs.autosomes.het > remove.Flt-0.4.txt
+
+# remove: depth < 5
+awk 'NR>1 && $3 < 5 {print $1}' SNPs.autosomes.idepth > remove.depthlt5.txt
+
+# remove: missingness > 0.05
+awk 'NR>1 && $5 > 0.05 {print $1}' SNPs.autosomes.imiss > remove.missgt0.05.txt
+
+cat remove.Flt-0.4.txt remove.depthlt5.txt remove.missgt0.05.txt \
+  | sort -u > remove.samples.txt
+
+# flag: -0.4 to -0.2
+awk 'NR>1 && $6 >= -0.4 && $6 < -0.2 {print $1}' SNPs.autosomes.het > flag.F-0.4to-0.2.txt
+
+# flag: depth 5-8 (optional)
+awk 'NR>1 && $3 >= 5 && $3 < 8 {print $1}' SNPs.autosomes.idepth > flag.depth5to8.txt
+
+cat flag.F-0.4to-0.2.txt flag.depth5to8.txt \
+  | sort -u | comm -23 - remove.samples.txt > flag.samples.txt
+
+cut -f1 SNPs.autosomes.het | tail -n +2 | sort -u > all.samples.txt
+comm -23 all.samples.txt <(cat remove.samples.txt flag.samples.txt | sort -u) > keep.samples.txt
+
+#!/bin/bash
+#SBATCH --job-name=miss_sweep
+#SBATCH --partition=high_mem
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=60G
+#SBATCH --time=06:00:00
+#SBATCH --output=miss_sweep.%j.out
+#SBATCH --error=miss_sweep.%j.err
+
+set -euo pipefail
+
+source /users/lw01165/miniconda3/etc/profile.d/conda.sh
+conda activate tools_env
+
+ANALYSIS_DIR=/parallel_scratch/lw01165/05_analysis
+IN_VCF=${ANALYSIS_DIR}/Ascaris.autosomes.SNPs.clean.vcf.gz
+OUT_BASE=${ANALYSIS_DIR}/Ascaris.autosomes.SNPs.clean
+
+echo "Input VCF: ${IN_VCF}"
+echo "Output base: ${OUT_BASE}"
+
+# Ensure tabix index exists
+if [ ! -f "${IN_VCF}.tbi" ]; then
+  echo "Index missing for ${IN_VCF} - creating..."
+  bcftools index -t "${IN_VCF}"
+fi
+
+# --------------------------
+# (1) Missingness summaries
+# --------------------------
+echo "Computing missingness per individual (.imiss)..."
+vcftools --gzvcf "${IN_VCF}" --missing-indv --out "${OUT_BASE}"
+
+echo "Computing missingness per site (.lmiss)..."
+vcftools --gzvcf "${IN_VCF}" --missing-site --out "${OUT_BASE}"
+
+IMISS="${OUT_BASE}.imiss"
+LMISS="${OUT_BASE}.lmiss"
+
+echo "Wrote: ${IMISS}"
+echo "Wrote: ${LMISS}"
+
+# -----------------------------------------
+# (2) Summarize sample missingness/call rate
+# -----------------------------------------
+# .imiss columns typically: INDV  N_DATA  N_GENOTYPED  N_MISS  F_MISS
+# call_rate = 1 - F_MISS
+echo "Summarising sample call rate / missingness..."
+SUM_TSV="${OUT_BASE}.imiss.summary.tsv"
+awk 'BEGIN{OFS="\t"}
+     NR==1{print "INDV","N_DATA","N_GENOTYPED","N_MISS","F_MISS","CALL_RATE"; next}
+     {call=1-$5; print $1,$2,$3,$4,$5,call}' "${IMISS}" > "${SUM_TSV}"
+
+echo "Top 10 worst samples by missingness (highest F_MISS):"
+# sort numeric descending by F_MISS (col 5), skip header
+tail -n +2 "${IMISS}" | sort -k5,5nr | head -n 10 | awk 'BEGIN{OFS="\t"}{print $1,$5}'
+
+# ----------------------------------------------------
+# (3) Make keep-lists for multiple sample thresholds
+# ----------------------------------------------------
+# These thresholds are MAX allowed missingness per sample (F_MISS).
+# Adjust as you like.
+SAMPLE_THRESHOLDS=(0.01 0.02 0.05 0.10)
+
+echo "Creating keep-lists for sample missingness thresholds..."
+for thr in "${SAMPLE_THRESHOLDS[@]}"; do
+  KEEP_LIST="${OUT_BASE}.keep.samples.maxFmiss${thr}.txt"
+  # keep samples with F_MISS <= thr
+  awk -v t="${thr}" 'NR>1 && $5<=t {print $1}' "${IMISS}" > "${KEEP_LIST}"
+  n_keep=$(wc -l < "${KEEP_LIST}")
+  echo "  ${KEEP_LIST} (n_keep=${n_keep})"
+done
+
+# -------------------------------------------------------------------
+# (4) Estimate site retention for multiple --max-missing cutoffs (X)
+# -------------------------------------------------------------------
+# For a given --max-missing X, sites are kept if F_MISS <= (1 - X)
+SITE_THRESHOLDS=(0.95 0.90 0.85 0.80 0.70)
+
+SITE_COUNT_TSV="${OUT_BASE}.lmiss.site_retention.tsv"
+echo -e "max_missing\tmax_F_MISS_allowed\tkept_sites\ttotal_sites\tprop_kept" > "${SITE_COUNT_TSV}"
+
+total_sites=$(awk 'NR>1{c++} END{print c+0}' "${LMISS}")
+
+echo "Estimating retention for different site call-rate thresholds..."
+for X in "${SITE_THRESHOLDS[@]}"; do
+  # allowed missing fraction:
+  # max_F = 1 - X
+  maxF=$(awk -v x="${X}" 'BEGIN{printf "%.6f", (1-x)}')
+  kept=$(awk -v m="${maxF}" 'NR>1 && $NF<=m {c++} END{print c+0}' "${LMISS}")
+  prop=$(awk -v k="${kept}" -v t="${total_sites}" 'BEGIN{if(t>0) printf "%.6f", (k/t); else print "NA"}')
+  echo -e "${X}\t${maxF}\t${kept}\t${total_sites}\t${prop}" >> "${SITE_COUNT_TSV}"
+done
+
+echo "Wrote: ${SITE_COUNT_TSV}"
+
+echo "Done."
