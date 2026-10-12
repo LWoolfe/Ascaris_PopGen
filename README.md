@@ -78,24 +78,3 @@ Raw WGS → fastp → Deacon host depletion → BWA-MEM → MarkDuplicates
 
 The historical all-sites VCF was produced by a separate GATK `GenotypeGVCFs --include-non-variant-sites` branch from the merged GVCF (command excerpt in `07`). The historical thesis PIXY statistics, downstream chromosomal patterns and candidate-region analyses were **not rerun** with the corrected VCF. The 325-SNP difference does **not** establish that pi/dXY or other statistics dependent on the original all-sites input were unaffected. Complete PIXY-derived reanalysis is reserved for publication. See [`99_PIXY_allsites_correction.md`](99_PIXY_allsites_correction.md).
 
-## Known reproducibility gaps / review notes
-
-The assembled files appear to cover all **major named analysis branches**, but **complete byte-for-byte reproduction has not been demonstrated**. The most material remaining items are:
-
-1. **Original full n=146 AMOVA R source**: input-preparation job is recovered, and results/model descriptions are known, but original executable R scripts are not present in the source files collected for this repository. Do not substitute balanced n=65 R code without labelling it as a reconstruction.
-2. **25-kb mappability-window BED producer**: the input `Ascaris.autosomes19.25kb.unique90.bed` was used (7,111 windows after thresholding) and earlier records identify `qc_25kb_mappability_070826.sub`; its exact script is not included here.
-3. **Re-execution compatibility**: the n=146 AMOVA preparation script uses `plink2 --recode vcf bgz`; PLINK2 documentation uses `--export vcf bgz`. The candidate outlier script also assumes an `outdir` in its first R block. Historical source commands are preserved and flagged, not modified.
-4. **Input provenance**: fixed balanced sample lists, final metadata, PIXY population files, variant-QC keep/exclusion lists, software environment records and some original HPC logs must be archived to make independent execution reproducible.
-
-Additional context and the distinction between confirmed vs inferred components appear in [`00_pipeline_overview_and_audit.md`](00_pipeline_overview_and_audit.md).
-
-## Practical reuse
-
-1. Consult the numbered files in order. The individual Bash jobs within them were submitted separately and their SLURM headers/resources are specific to the original environment.
-2. Replace absolute HPC and `S:` Windows paths when adapting, but do **not** interpret those changes as part of the original published method.
-3. Preserve all input/sample lists, log files and environment-version records that can still be recovered.
-4. Keep original thesis results and the corrected PIXY VCF clearly distinct; avoid presenting historical outputs as having been recalculated.
-
-## Citation and authorship
-
-Analytical code was developed for the *Ascaris* WGS population-genomics thesis/paper at the University of Surrey. Add the paper/preprint DOI, authors, licence and software version/environment lockfiles when confirmed. No licence is inferred here.
