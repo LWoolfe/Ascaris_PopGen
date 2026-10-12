@@ -77,9 +77,1007 @@ bcftools index -n Ascaris.146.pruned.100kSNPs.vcf.gz || true
 
 ```
 
-> **Missing original source:** We have located descriptions/paths for the full 146-sample AMOVA R models (`amova_region_country.R`, `amova_region_host.R`, `amova_host.R`, and region-only) but not their complete original executable contents in the files available to this repository. The balanced n=65 R script below is **not evidence of the exact full-dataset R model implementation**. This source-code gap remains open.
+### 08B. Full n=146 AMOVA R models (recovered original scripts)
 
-### 08B. Historical Wahlund and balanced n=65 AMOVA scripts
+These original source files close the previously recorded gap in the **full n=146 AMOVA R-model code**. They load the **100,000-SNP VCF derived from the full 146-sample dataset**, run `poppr.amova()` and assess variance components using `randtest(..., nrepet = 999)`. The separately documented balanced n=65 AMOVA is a sensitivity analysis, not the primary full-dataset analysis.
+
+| Original script | Model | Inclusion rule |
+|---|---|---|
+| [`amova_region.R`](scripts/amova_full_146/amova_region.R) | `~region` | Geographic region must be recorded |
+| [`amova_host.R`](scripts/amova_full_146/amova_host.R) | `~host` | Host must be recorded; does not require region |
+| [`amova_region_country.R`](scripts/amova_full_146/amova_region_country.R) | `~region/country` | Both region and country must be recorded |
+| [`amova_region_host.R`](scripts/amova_full_146/amova_region_host.R) | `~region/host` | Both region and host must be recorded |
+| [`amova_africa.R`](scripts/amova_full_146/amova_africa.R) | `~host (Africa only)` | Must be in Africa, have a host assignment, and retain ≥2 host groups |
+
+**Important source-provenance checks:**
+
+- **Input VCF path inconsistency:** the original `amova_region.R` points to `05i_pixy/amova_146_100k_dataset/`, whereas the four other model scripts and the recovered full-dataset preparation job point to `05i_pixy/amova_100k_dataset/`. Both paths are preserved in the original scripts; the correct historical path should be confirmed against HPC outputs/logs before reproduction.
+- **Metadata and actual model sample sizes:** the `n=146` designation describes the source genotype dataset. Each R model then excludes individuals without its required grouping metadata. In particular, manually curated sample `ERR068355` lacks country and region but has host information, so it may be included in the host-only model and excluded from region-based models. The scripts write the metadata subset used for their respective models.
+- **Metadata column-name reproducibility:** the original uploaded metadata CSV has a BOM and trailing whitespace in the `sample_id ` header. Original R scripts call `rename(IID = sample_id)` without first trimming column names; the normalised repository copy has an exact `sample_id` column, but the historical HPC input's exact header is not independently verified. Do not silently amend the original R scripts.
+- **Execution status:** original scripts were recovered and inspected; their existence does not prove execution success or demonstrate that the old output values were reproduced. Preserve historical results, logs and source VCFs when available.
+
+The following code blocks preserve the **original source contents without modifying parameters or paths**. Standalone, unchanged `.R` files are also archived under [`scripts/amova_full_146/`](scripts/amova_full_146/README.md).
+
+#### Region only — `amova_region.R`
+
+```r
+# =============================
+# AMOVA: region only
+# =============================
+
+.libPaths("~/R/library")
+
+suppressPackageStartupMessages({
+  library(vcfR)
+  library(dplyr)
+  library(stringr)
+  library(adegenet)
+  library(poppr)
+})
+
+# -----------------------------
+# File paths
+# -----------------------------
+vcf_file <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_146_100k_dataset/Ascaris.146.pruned.100kSNPs.vcf.gz"
+meta_file <- "/parallel_scratch/lw01165/05_analysis/sample_QC_list.csv"
+outdir    <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_results_region_only"
+
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+cat("======================================\n")
+cat("AMOVA started: region only\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("VCF: ", vcf_file, "\n", sep = "")
+cat("Metadata: ", meta_file, "\n", sep = "")
+cat("Output directory: ", outdir, "\n", sep = "")
+cat("======================================\n\n")
+
+# -----------------------------
+# Read data
+# -----------------------------
+cat("Reading VCF...\n")
+vcf <- read.vcfR(vcf_file)
+
+cat("Reading metadata...\n")
+meta <- read.csv(meta_file, stringsAsFactors = FALSE)
+
+# -----------------------------
+# Clean metadata
+# -----------------------------
+meta <- meta %>%
+  rename(IID = sample_id) %>%
+  mutate(
+    IID     = str_trim(IID),
+    region  = str_to_lower(str_trim(region)),
+    country = str_to_title(str_to_lower(str_trim(country))),
+    host    = str_to_lower(str_trim(host))
+  ) %>%
+  mutate(
+    region  = na_if(region, ""),
+    country = na_if(country, ""),
+    host    = na_if(host, "")
+  )
+
+# -----------------------------
+# Match metadata to VCF
+# -----------------------------
+vcf_samples <- colnames(vcf@gt)[-1]
+
+cat("Checking sample mismatches...\n")
+vcf_not_meta <- setdiff(vcf_samples, meta$IID)
+meta_not_vcf <- setdiff(meta$IID, vcf_samples)
+
+cat("Samples in VCF but not metadata: ", length(vcf_not_meta), "\n", sep = "")
+if (length(vcf_not_meta) > 0) print(vcf_not_meta)
+
+cat("Samples in metadata but not VCF: ", length(meta_not_vcf), "\n", sep = "")
+if (length(meta_not_vcf) > 0) print(meta_not_vcf)
+
+meta <- meta %>%
+  filter(IID %in% vcf_samples)
+
+meta <- meta[match(vcf_samples, meta$IID), ]
+
+if (!all(meta$IID == vcf_samples)) {
+  stop("ERROR: metadata and VCF sample order do not match after reordering.")
+}
+
+write.csv(
+  meta,
+  file = file.path(outdir, "clean_metadata_matched_to_vcf.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("\nMetadata aligned to VCF successfully.\n")
+cat("Total matched samples: ", nrow(meta), "\n\n", sep = "")
+
+cat("Sample counts by region:\n")
+print(table(meta$region, useNA = "ifany"))
+
+# -----------------------------
+# Keep samples for this model
+# -----------------------------
+keep_region <- !is.na(meta$region)
+
+meta_region <- meta[keep_region, ]
+
+cat("\nSamples retained for region-only AMOVA: ", nrow(meta_region), "\n", sep = "")
+cat("Regions included:\n")
+print(table(meta_region$region))
+
+write.csv(
+  meta_region,
+  file = file.path(outdir, "metadata_region_only_used.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# -----------------------------
+# Convert VCF to genind/genclone
+# -----------------------------
+cat("\nConverting VCF to genind...\n")
+genind_obj <- vcfR2genind(vcf)
+
+rm(vcf)
+gc()
+
+if (!all(indNames(genind_obj) == meta$IID)) {
+  stop("ERROR: genind individual names do not match metadata IID order.")
+}
+
+cat("Subsetting genind for retained samples...\n")
+genind_region <- genind_obj[keep_region]
+
+rm(genind_obj)
+gc()
+
+if (!all(indNames(genind_region) == meta_region$IID)) {
+  stop("ERROR: subset genind names do not match metadata IID order.")
+}
+
+cat("Converting genind to genclone...\n")
+genclone_region <- as.genclone(genind_region)
+
+rm(genind_region)
+gc()
+
+strata(genclone_region) <- data.frame(
+  region = factor(meta_region$region)
+)
+
+# -----------------------------
+# Run AMOVA
+# -----------------------------
+cat("\n======================================\n")
+cat("Running AMOVA: region only\n")
+cat("======================================\n")
+
+amova_region <- poppr.amova(genclone_region, ~region)
+print(amova_region)
+
+cat("\nRunning permutation test (999 replicates)...\n")
+region_test <- randtest(amova_region, nrepet = 999)
+print(region_test)
+
+# -----------------------------
+# Save outputs
+# -----------------------------
+write.table(
+  capture.output(amova_region),
+  file = file.path(outdir, "amova_region_only.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+write.table(
+  capture.output(region_test),
+  file = file.path(outdir, "amova_region_only_randtest.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+saveRDS(amova_region, file = file.path(outdir, "amova_region_only.rds"))
+saveRDS(region_test,  file = file.path(outdir, "amova_region_only_randtest.rds"))
+
+cat("\n======================================\n")
+cat("AMOVA complete: region only\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("Results written to: ", outdir, "\n", sep = "")
+cat("======================================\n")
+```
+
+#### Host only — `amova_host.R`
+
+```r
+# =============================
+# AMOVA: host
+# =============================
+
+.libPaths("~/R/library")
+
+suppressPackageStartupMessages({
+  library(vcfR)
+  library(dplyr)
+  library(stringr)
+  library(adegenet)
+  library(poppr)
+})
+
+# -----------------------------
+# File paths
+# -----------------------------
+vcf_file  <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_100k_dataset/Ascaris.146.pruned.100kSNPs.vcf.gz"
+meta_file <- "/parallel_scratch/lw01165/05_analysis/sample_QC_list.csv"
+outdir    <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_results_host"
+
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+cat("======================================\n")
+cat("AMOVA started: host\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("VCF: ", vcf_file, "\n", sep = "")
+cat("Metadata: ", meta_file, "\n", sep = "")
+cat("Output directory: ", outdir, "\n", sep = "")
+cat("======================================\n\n")
+
+# -----------------------------
+# Read data
+# -----------------------------
+cat("Reading VCF...\n")
+vcf <- read.vcfR(vcf_file)
+
+cat("Reading metadata...\n")
+meta <- read.csv(meta_file, stringsAsFactors = FALSE)
+
+# -----------------------------
+# Clean metadata
+# -----------------------------
+meta <- meta %>%
+  rename(IID = sample_id) %>%
+  mutate(
+    IID     = str_trim(IID),
+    region  = str_to_lower(str_trim(region)),
+    country = str_to_title(str_to_lower(str_trim(country))),
+    host    = str_to_lower(str_trim(host))
+  ) %>%
+  mutate(
+    region  = na_if(region, ""),
+    country = na_if(country, ""),
+    host    = na_if(host, "")
+  )
+
+# -----------------------------
+# Match metadata to VCF
+# -----------------------------
+vcf_samples <- colnames(vcf@gt)[-1]
+
+cat("Checking sample mismatches...\n")
+vcf_not_meta <- setdiff(vcf_samples, meta$IID)
+meta_not_vcf <- setdiff(meta$IID, vcf_samples)
+
+cat("Samples in VCF but not metadata: ", length(vcf_not_meta), "\n", sep = "")
+if (length(vcf_not_meta) > 0) print(vcf_not_meta)
+
+cat("Samples in metadata but not VCF: ", length(meta_not_vcf), "\n", sep = "")
+if (length(meta_not_vcf) > 0) print(meta_not_vcf)
+
+meta <- meta %>%
+  filter(IID %in% vcf_samples)
+
+meta <- meta[match(vcf_samples, meta$IID), ]
+
+if (!all(meta$IID == vcf_samples)) {
+  stop("ERROR: metadata and VCF sample order do not match after reordering.")
+}
+
+write.csv(
+  meta,
+  file = file.path(outdir, "clean_metadata_matched_to_vcf.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("\nMetadata aligned to VCF successfully.\n")
+cat("Total matched samples: ", nrow(meta), "\n\n", sep = "")
+
+cat("Sample counts by host:\n")
+print(table(meta$host, useNA = "ifany"))
+
+# -----------------------------
+# Keep samples for this model
+# -----------------------------
+keep_host <- !is.na(meta$host)
+
+meta_host <- meta[keep_host, ]
+
+cat("\nSamples retained for host AMOVA: ", nrow(meta_host), "\n", sep = "")
+cat("Hosts included:\n")
+print(table(meta_host$host))
+
+write.csv(
+  meta_host,
+  file = file.path(outdir, "metadata_host_used.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# -----------------------------
+# Convert VCF to genind/genclone
+# -----------------------------
+cat("\nConverting VCF to genind...\n")
+genind_obj <- vcfR2genind(vcf)
+
+rm(vcf)
+gc()
+
+if (!all(indNames(genind_obj) == meta$IID)) {
+  stop("ERROR: genind individual names do not match metadata IID order.")
+}
+
+cat("Subsetting genind for retained samples...\n")
+genind_host <- genind_obj[keep_host]
+
+rm(genind_obj)
+gc()
+
+if (!all(indNames(genind_host) == meta_host$IID)) {
+  stop("ERROR: subset genind names do not match metadata IID order.")
+}
+
+cat("Converting genind to genclone...\n")
+genclone_host <- as.genclone(genind_host)
+
+rm(genind_host)
+gc()
+
+strata(genclone_host) <- data.frame(
+  host = factor(meta_host$host)
+)
+
+# -----------------------------
+# Run AMOVA
+# -----------------------------
+cat("\n======================================\n")
+cat("Running AMOVA: host\n")
+cat("======================================\n")
+
+amova_host <- poppr.amova(genclone_host, ~host)
+print(amova_host)
+
+cat("\nRunning permutation test (999 replicates)...\n")
+host_test <- randtest(amova_host, nrepet = 999)
+print(host_test)
+
+# -----------------------------
+# Save outputs
+# -----------------------------
+write.table(
+  capture.output(amova_host),
+  file = file.path(outdir, "amova_host.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+write.table(
+  capture.output(host_test),
+  file = file.path(outdir, "amova_host_randtest.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+saveRDS(amova_host, file = file.path(outdir, "amova_host.rds"))
+saveRDS(host_test,  file = file.path(outdir, "amova_host_randtest.rds"))
+
+cat("\n======================================\n")
+cat("AMOVA complete: host\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("Results written to: ", outdir, "\n", sep = "")
+cat("======================================\n")
+```
+
+#### Region / country — `amova_region_country.R`
+
+```r
+# =============================
+# AMOVA: region / country
+# =============================
+
+.libPaths("~/R/library")
+
+suppressPackageStartupMessages({
+  library(vcfR)
+  library(dplyr)
+  library(stringr)
+  library(adegenet)
+  library(poppr)
+})
+
+# -----------------------------
+# File paths
+# -----------------------------
+vcf_file <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_100k_dataset/Ascaris.146.pruned.100kSNPs.vcf.gz"
+meta_file <- "/parallel_scratch/lw01165/05_analysis/sample_QC_list.csv"
+outdir    <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_results_region_country"
+
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+cat("======================================\n")
+cat("AMOVA started: region / country\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("VCF: ", vcf_file, "\n", sep = "")
+cat("Metadata: ", meta_file, "\n", sep = "")
+cat("Output directory: ", outdir, "\n", sep = "")
+cat("======================================\n\n")
+
+# -----------------------------
+# Read data
+# -----------------------------
+cat("Reading VCF...\n")
+vcf <- read.vcfR(vcf_file)
+
+cat("Reading metadata...\n")
+meta <- read.csv(meta_file, stringsAsFactors = FALSE)
+
+# -----------------------------
+# Clean metadata
+# -----------------------------
+meta <- meta %>%
+  rename(IID = sample_id) %>%
+  mutate(
+    IID     = str_trim(IID),
+    region  = str_to_lower(str_trim(region)),
+    country = str_to_title(str_to_lower(str_trim(country))),
+    host    = str_to_lower(str_trim(host))
+  ) %>%
+  mutate(
+    region  = na_if(region, ""),
+    country = na_if(country, ""),
+    host    = na_if(host, "")
+  )
+
+# -----------------------------
+# Match metadata to VCF
+# -----------------------------
+vcf_samples <- colnames(vcf@gt)[-1]
+
+cat("Checking sample mismatches...\n")
+vcf_not_meta <- setdiff(vcf_samples, meta$IID)
+meta_not_vcf <- setdiff(meta$IID, vcf_samples)
+
+cat("Samples in VCF but not metadata: ", length(vcf_not_meta), "\n", sep = "")
+if (length(vcf_not_meta) > 0) print(vcf_not_meta)
+
+cat("Samples in metadata but not VCF: ", length(meta_not_vcf), "\n", sep = "")
+if (length(meta_not_vcf) > 0) print(meta_not_vcf)
+
+meta <- meta %>%
+  filter(IID %in% vcf_samples)
+
+meta <- meta[match(vcf_samples, meta$IID), ]
+
+if (!all(meta$IID == vcf_samples)) {
+  stop("ERROR: metadata and VCF sample order do not match after reordering.")
+}
+
+write.csv(
+  meta,
+  file = file.path(outdir, "clean_metadata_matched_to_vcf.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("\nMetadata aligned to VCF successfully.\n")
+cat("Total matched samples: ", nrow(meta), "\n\n", sep = "")
+
+cat("Sample counts by region:\n")
+print(table(meta$region, useNA = "ifany"))
+
+cat("\nSample counts by country:\n")
+print(table(meta$country, useNA = "ifany"))
+
+# -----------------------------
+# Keep samples for this model
+# -----------------------------
+keep_geo <- !is.na(meta$region) & !is.na(meta$country)
+
+meta_geo <- meta[keep_geo, ]
+
+cat("\nSamples retained for region/country AMOVA: ", nrow(meta_geo), "\n", sep = "")
+cat("Regions included:\n")
+print(table(meta_geo$region))
+cat("Countries included:\n")
+print(table(meta_geo$country))
+
+write.csv(
+  meta_geo,
+  file = file.path(outdir, "metadata_region_country_used.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# -----------------------------
+# Convert VCF to genind/genclone
+# -----------------------------
+cat("\nConverting VCF to genind...\n")
+genind_obj <- vcfR2genind(vcf)
+
+rm(vcf)
+gc()
+
+if (!all(indNames(genind_obj) == meta$IID)) {
+  stop("ERROR: genind individual names do not match metadata IID order.")
+}
+
+cat("Subsetting genind for retained samples...\n")
+genind_geo <- genind_obj[keep_geo]
+
+rm(genind_obj)
+gc()
+
+if (!all(indNames(genind_geo) == meta_geo$IID)) {
+  stop("ERROR: subset genind names do not match metadata IID order.")
+}
+
+cat("Converting genind to genclone...\n")
+genclone_geo <- as.genclone(genind_geo)
+
+rm(genind_geo)
+gc()
+
+strata(genclone_geo) <- data.frame(
+  region  = factor(meta_geo$region),
+  country = factor(meta_geo$country)
+)
+
+# -----------------------------
+# Run AMOVA
+# -----------------------------
+cat("\n======================================\n")
+cat("Running AMOVA: region / country\n")
+cat("======================================\n")
+
+amova_geo <- poppr.amova(genclone_geo, ~region/country)
+print(amova_geo)
+
+cat("\nRunning permutation test (999 replicates)...\n")
+geo_test <- randtest(amova_geo, nrepet = 999)
+print(geo_test)
+
+# -----------------------------
+# Save outputs
+# -----------------------------
+write.table(
+  capture.output(amova_geo),
+  file = file.path(outdir, "amova_region_country.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+write.table(
+  capture.output(geo_test),
+  file = file.path(outdir, "amova_region_country_randtest.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+saveRDS(amova_geo, file = file.path(outdir, "amova_region_country.rds"))
+saveRDS(geo_test,  file = file.path(outdir, "amova_region_country_randtest.rds"))
+
+cat("\n======================================\n")
+cat("AMOVA complete: region / country\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("Results written to: ", outdir, "\n", sep = "")
+cat("======================================\n")
+```
+
+#### Region / host — `amova_region_host.R`
+
+```r
+# =============================
+# AMOVA: region / host
+# =============================
+
+.libPaths("~/R/library")
+
+suppressPackageStartupMessages({
+  library(vcfR)
+  library(dplyr)
+  library(stringr)
+  library(adegenet)
+  library(poppr)
+})
+
+# -----------------------------
+# File paths
+# -----------------------------
+vcf_file <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_100k_dataset/Ascaris.146.pruned.100kSNPs.vcf.gz"
+meta_file <- "/parallel_scratch/lw01165/05_analysis/sample_QC_list.csv"
+outdir    <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_results_region_host"
+
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+cat("======================================\n")
+cat("AMOVA started: region / host\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("VCF: ", vcf_file, "\n", sep = "")
+cat("Metadata: ", meta_file, "\n", sep = "")
+cat("Output directory: ", outdir, "\n", sep = "")
+cat("======================================\n\n")
+
+# -----------------------------
+# Read data
+# -----------------------------
+cat("Reading VCF...\n")
+vcf <- read.vcfR(vcf_file)
+
+cat("Reading metadata...\n")
+meta <- read.csv(meta_file, stringsAsFactors = FALSE)
+
+# -----------------------------
+# Clean metadata
+# -----------------------------
+meta <- meta %>%
+  rename(IID = sample_id) %>%
+  mutate(
+    IID     = str_trim(IID),
+    region  = str_to_lower(str_trim(region)),
+    country = str_to_title(str_to_lower(str_trim(country))),
+    host    = str_to_lower(str_trim(host))
+  ) %>%
+  mutate(
+    region  = na_if(region, ""),
+    country = na_if(country, ""),
+    host    = na_if(host, "")
+  )
+
+# -----------------------------
+# Match metadata to VCF
+# -----------------------------
+vcf_samples <- colnames(vcf@gt)[-1]
+
+cat("Checking sample mismatches...\n")
+vcf_not_meta <- setdiff(vcf_samples, meta$IID)
+meta_not_vcf <- setdiff(meta$IID, vcf_samples)
+
+cat("Samples in VCF but not metadata: ", length(vcf_not_meta), "\n", sep = "")
+if (length(vcf_not_meta) > 0) print(vcf_not_meta)
+
+cat("Samples in metadata but not VCF: ", length(meta_not_vcf), "\n", sep = "")
+if (length(meta_not_vcf) > 0) print(meta_not_vcf)
+
+meta <- meta %>%
+  filter(IID %in% vcf_samples)
+
+meta <- meta[match(vcf_samples, meta$IID), ]
+
+if (!all(meta$IID == vcf_samples)) {
+  stop("ERROR: metadata and VCF sample order do not match after reordering.")
+}
+
+write.csv(
+  meta,
+  file = file.path(outdir, "clean_metadata_matched_to_vcf.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("\nMetadata aligned to VCF successfully.\n")
+cat("Total matched samples: ", nrow(meta), "\n\n", sep = "")
+
+cat("Sample counts by region:\n")
+print(table(meta$region, useNA = "ifany"))
+
+cat("\nSample counts by host:\n")
+print(table(meta$host, useNA = "ifany"))
+
+# -----------------------------
+# Keep samples for this model
+# -----------------------------
+keep_host_geo <- !is.na(meta$region) & !is.na(meta$host)
+
+meta_host_geo <- meta[keep_host_geo, ]
+
+cat("\nSamples retained for region/host AMOVA: ", nrow(meta_host_geo), "\n", sep = "")
+cat("Regions included:\n")
+print(table(meta_host_geo$region))
+cat("Hosts included:\n")
+print(table(meta_host_geo$host))
+
+write.csv(
+  meta_host_geo,
+  file = file.path(outdir, "metadata_region_host_used.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# -----------------------------
+# Convert VCF to genind/genclone
+# -----------------------------
+cat("\nConverting VCF to genind...\n")
+genind_obj <- vcfR2genind(vcf)
+
+rm(vcf)
+gc()
+
+if (!all(indNames(genind_obj) == meta$IID)) {
+  stop("ERROR: genind individual names do not match metadata IID order.")
+}
+
+cat("Subsetting genind for retained samples...\n")
+genind_host_geo <- genind_obj[keep_host_geo]
+
+rm(genind_obj)
+gc()
+
+if (!all(indNames(genind_host_geo) == meta_host_geo$IID)) {
+  stop("ERROR: subset genind names do not match metadata IID order.")
+}
+
+cat("Converting genind to genclone...\n")
+genclone_host_geo <- as.genclone(genind_host_geo)
+
+rm(genind_host_geo)
+gc()
+
+strata(genclone_host_geo) <- data.frame(
+  region = factor(meta_host_geo$region),
+  host   = factor(meta_host_geo$host)
+)
+
+# -----------------------------
+# Run AMOVA
+# -----------------------------
+cat("\n======================================\n")
+cat("Running AMOVA: region / host\n")
+cat("======================================\n")
+
+amova_host_geo <- poppr.amova(genclone_host_geo, ~region/host)
+print(amova_host_geo)
+
+cat("\nRunning permutation test (999 replicates)...\n")
+host_geo_test <- randtest(amova_host_geo, nrepet = 999)
+print(host_geo_test)
+
+# -----------------------------
+# Save outputs
+# -----------------------------
+write.table(
+  capture.output(amova_host_geo),
+  file = file.path(outdir, "amova_region_host.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+write.table(
+  capture.output(host_geo_test),
+  file = file.path(outdir, "amova_region_host_randtest.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+saveRDS(amova_host_geo, file = file.path(outdir, "amova_region_host.rds"))
+saveRDS(host_geo_test,  file = file.path(outdir, "amova_region_host_randtest.rds"))
+
+cat("\n======================================\n")
+cat("AMOVA complete: region / host\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("Results written to: ", outdir, "\n", sep = "")
+cat("======================================\n")
+```
+
+#### Host within Africa — `amova_africa.R`
+
+```r
+# =============================
+# AMOVA: within Africa, host only
+# =============================
+
+.libPaths("~/R/library")
+
+suppressPackageStartupMessages({
+  library(vcfR)
+  library(dplyr)
+  library(stringr)
+  library(adegenet)
+  library(poppr)
+})
+
+# -----------------------------
+# File paths
+# -----------------------------
+vcf_file <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_100k_dataset/Ascaris.146.pruned.100kSNPs.vcf.gz"
+meta_file <- "/parallel_scratch/lw01165/05_analysis/sample_QC_list.csv"
+outdir    <- "/parallel_scratch/lw01165/05_analysis/05i_pixy/amova_results_africa_host"
+
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+cat("======================================\n")
+cat("AMOVA started: within Africa / host\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("VCF: ", vcf_file, "\n", sep = "")
+cat("Metadata: ", meta_file, "\n", sep = "")
+cat("Output directory: ", outdir, "\n", sep = "")
+cat("======================================\n\n")
+
+# -----------------------------
+# Read data
+# -----------------------------
+cat("Reading VCF...\n")
+vcf <- read.vcfR(vcf_file)
+
+cat("Reading metadata...\n")
+meta <- read.csv(meta_file, stringsAsFactors = FALSE)
+
+# -----------------------------
+# Clean metadata
+# -----------------------------
+meta <- meta %>%
+  rename(IID = sample_id) %>%
+  mutate(
+    IID     = str_trim(IID),
+    region  = str_to_lower(str_trim(region)),
+    country = str_to_title(str_to_lower(str_trim(country))),
+    host    = str_to_lower(str_trim(host))
+  ) %>%
+  mutate(
+    region  = na_if(region, ""),
+    country = na_if(country, ""),
+    host    = na_if(host, "")
+  )
+
+# -----------------------------
+# Match metadata to VCF
+# -----------------------------
+vcf_samples <- colnames(vcf@gt)[-1]
+
+cat("Checking sample mismatches...\n")
+vcf_not_meta <- setdiff(vcf_samples, meta$IID)
+meta_not_vcf <- setdiff(meta$IID, vcf_samples)
+
+cat("Samples in VCF but not metadata: ", length(vcf_not_meta), "\n", sep = "")
+if (length(vcf_not_meta) > 0) print(vcf_not_meta)
+
+cat("Samples in metadata but not VCF: ", length(meta_not_vcf), "\n", sep = "")
+if (length(meta_not_vcf) > 0) print(meta_not_vcf)
+
+meta <- meta %>%
+  filter(IID %in% vcf_samples)
+
+meta <- meta[match(vcf_samples, meta$IID), ]
+
+if (!all(meta$IID == vcf_samples)) {
+  stop("ERROR: metadata and VCF sample order do not match after reordering.")
+}
+
+write.csv(
+  meta,
+  file = file.path(outdir, "clean_metadata_matched_to_vcf.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("\nMetadata aligned to VCF successfully.\n")
+cat("Total matched samples: ", nrow(meta), "\n\n", sep = "")
+
+cat("Sample counts by region:\n")
+print(table(meta$region, useNA = "ifany"))
+
+cat("\nSample counts by host:\n")
+print(table(meta$host, useNA = "ifany"))
+
+# -----------------------------
+# Keep Africa samples with host metadata
+# -----------------------------
+keep_africa_host <- !is.na(meta$region) & !is.na(meta$host) & meta$region == "africa"
+
+meta_africa_host <- meta[keep_africa_host, ]
+
+cat("\nSamples retained for within-Africa host AMOVA: ", nrow(meta_africa_host), "\n", sep = "")
+cat("Countries included:\n")
+print(table(meta_africa_host$country, useNA = "ifany"))
+cat("Hosts included:\n")
+print(table(meta_africa_host$host, useNA = "ifany"))
+
+write.csv(
+  meta_africa_host,
+  file = file.path(outdir, "metadata_africa_host_used.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# Optional safety check
+if (length(unique(meta_africa_host$host)) < 2) {
+  stop("ERROR: Fewer than 2 host groups remain within Africa. Cannot run host AMOVA.")
+}
+
+# -----------------------------
+# Convert VCF to genind/genclone
+# -----------------------------
+cat("\nConverting VCF to genind...\n")
+genind_obj <- vcfR2genind(vcf)
+
+rm(vcf)
+gc()
+
+if (!all(indNames(genind_obj) == meta$IID)) {
+  stop("ERROR: genind individual names do not match metadata IID order.")
+}
+
+cat("Subsetting genind for retained Africa samples...\n")
+genind_africa_host <- genind_obj[keep_africa_host]
+
+rm(genind_obj)
+gc()
+
+if (!all(indNames(genind_africa_host) == meta_africa_host$IID)) {
+  stop("ERROR: subset genind names do not match metadata IID order.")
+}
+
+cat("Converting genind to genclone...\n")
+genclone_africa_host <- as.genclone(genind_africa_host)
+
+rm(genind_africa_host)
+gc()
+
+strata(genclone_africa_host) <- data.frame(
+  host = factor(meta_africa_host$host)
+)
+
+# -----------------------------
+# Run AMOVA
+# -----------------------------
+cat("\n======================================\n")
+cat("Running AMOVA: within Africa / host\n")
+cat("======================================\n")
+
+amova_africa_host <- poppr.amova(genclone_africa_host, ~host)
+print(amova_africa_host)
+
+cat("\nRunning permutation test (999 replicates)...\n")
+africa_host_test <- randtest(amova_africa_host, nrepet = 999)
+print(africa_host_test)
+
+# -----------------------------
+# Save outputs
+# -----------------------------
+write.table(
+  capture.output(amova_africa_host),
+  file = file.path(outdir, "amova_africa_host.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+write.table(
+  capture.output(africa_host_test),
+  file = file.path(outdir, "amova_africa_host_randtest.txt"),
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+saveRDS(amova_africa_host, file = file.path(outdir, "amova_africa_host.rds"))
+saveRDS(africa_host_test,  file = file.path(outdir, "amova_africa_host_randtest.rds"))
+
+cat("\n======================================\n")
+cat("AMOVA complete: within Africa / host\n")
+cat("Time: ", as.character(Sys.time()), "\n", sep = "")
+cat("Results written to: ", outdir, "\n", sep = "")
+cat("======================================\n")
+```
+
+---
+
+### 08C. Historical Wahlund and balanced n=65 AMOVA scripts
 
 # Supplementary heterozygosity-pooling check and AMOVA
 
@@ -973,7 +1971,7 @@ Rscript /parallel_scratch/lw01165/05_analysis/05i_pixy/amova_65_balanced_all_mod
 
 ## RStudio/cluster R code: AMOVA models
 
-Purpose: run single-factor and hierarchical AMOVA models: region only, region/country, host only, and region/host. The same model structure was used on both the full and balanced datasets, but only balanced dataset shown here. 
+Purpose: run the balanced n=65 AMOVA sensitivity models: region only, region/country, host only, and region/host. The full n=146 models are preserved separately in Section 08B. 
 
 
 ```r
@@ -1504,7 +2502,7 @@ Wahlund H_T / H_S tests, AMOVA models with permutation tests. Consult recorded l
 
 ## Provenance and limitations
 
-- Original full n=146 R model code not preserved in available source; full input-prep command documented.
+- Original full n=146 R scripts are now archived verbatim for five models (region only, host only, region/country, region/host and within-Africa host), alongside the full 100,000-SNP preparation job. The source-path discrepancy in `amova_region.R` and metadata-header compatibility require verification against historical inputs.
 - Sample identifiers and host/country metadata were manually curated in `sample_QC_list.csv`; it is not generated by an algorithm in these files.
 - Commands, versions, seeds and paths are retained where present; annotations are not evidence that all jobs have been freshly rerun.
 - For the discovery and correction of the PIXY all-sites input issue, see [`99_PIXY_allsites_correction.md`](99_PIXY_allsites_correction.md).
