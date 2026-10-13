@@ -4198,5 +4198,3 @@ These are **pipeline parameters and validation conditions**, not proof that ever
 - The copy-number dataset uses all 156 marked-duplicate BAMs before the final variant-QC exclusions; its ≥5× subset is distinct from the nuclear variant-calling n = 146 set.
 - The mean-depth baseline is the median across included 25-kb windows, not necessarily coverage at every nucleotide.
 - `sample_QC_list.csv` was **manually curated**; keep the actual file and describe its provenance.
-- The original `SNP_genotype_counts` script is now embedded in full (04C); 04D independently checks its PSC record counts and percentage calculations. Retain the original SLURM log where available.
-- **The PIXY all-sites correction is a separate pipeline**: `99_PIXY_allsites_correction.md`.
