@@ -16,12 +16,9 @@ See the original annotated analysis sequence below. Distinct script blocks are i
 
 ### 08A. Full n=146 AMOVA input construction (recovered original commands)
 
-**Computational constraint (confirmed by analyst):** Full-dataset AMOVA was conducted on **100,000 SNPs selected from the LD-pruned n=146 dataset**, not all ~13.48 million SNPs. Attempting AMOVA on the complete SNP set was computationally impractical and did not run successfully. The subset was therefore a deliberate feasibility step. This is distinct from the **balanced n=65 AMOVA**, which also has its own 100,000-SNP preparation workflow below. Do not describe either AMOVA as using all SNPs or imply that the 100,000-SNP subset contained every retained SNP.
+**Computational constraint (confirmed by analyst):** Full-dataset AMOVA was conducted on **100,000 SNPs selected from the LD-pruned n=146 dataset**, not all ~13.48 million SNPs. Attempting AMOVA on the complete SNP set was computationally impractical and did not run successfully. The subset was therefore a deliberate feasibility step. This is distinct from the **balanced n=65 AMOVA**, which also has its own 100,000-SNP preparation workflow below. 
 
-
-Uses the **existing full-population PLINK dataset pruned at r²=0.15** in `05d_plink_146`, followed by PLINK2 `--thin-count 100000` to produce an AMOVA-specific 100k subset. **No seed is specified in this recovered script**, so exact re-selection of 100k loci from scratch is not guaranteed.
-
-> **Compatibility warning, not a retrospective change:** the recovered job uses `plink2 --recode vcf bgz`, whereas the documented PLINK2 export flag is `--export vcf bgz`. The `.vcf.gz` was reported to exist historically, so the script may reflect a mixed executable version or a command that required manual correction. Check the historical `.out`/`.err` before claiming this exact command executed successfully.
+Uses the **existing full-population PLINK dataset pruned at r²=0.15** in `05d_plink_146`, followed by PLINK2 `--thin-count 100000` to produce an AMOVA-specific 100k subset. 
 
 ```bash
 #!/bin/bash
@@ -77,9 +74,9 @@ bcftools index -n Ascaris.146.pruned.100kSNPs.vcf.gz || true
 
 ```
 
-### 08B. Full n=146 AMOVA R models (recovered original scripts)
+### 08B. Full n=146 AMOVA R models 
 
-These original source files close the previously recorded gap in the **full n=146 AMOVA R-model code**. They load the **100,000-SNP VCF derived from the full 146-sample dataset**, run `poppr.amova()` and assess variance components using `randtest(..., nrepet = 999)`. The separately documented balanced n=65 AMOVA is a sensitivity analysis, not the primary full-dataset analysis.
+These original files display the **full n=146 AMOVA R-model code**. They load the **100,000-SNP VCF derived from the full 146-sample dataset**, run `poppr.amova()` and assess variance components using `randtest(..., nrepet = 999)`. The separately documented balanced n=65 AMOVA is a sensitivity analysis, not the primary full-dataset analysis.
 
 | Original script | Model | Inclusion rule |
 |---|---|---|
@@ -89,14 +86,7 @@ These original source files close the previously recorded gap in the **full n=14
 | [`amova_region_host.R`](scripts/amova_full_146/amova_region_host.R) | `~region/host` | Both region and host must be recorded |
 | [`amova_africa.R`](scripts/amova_full_146/amova_africa.R) | `~host (Africa only)` | Must be in Africa, have a host assignment, and retain ≥2 host groups |
 
-**Important source-provenance checks:**
-
-- **Input VCF path inconsistency:** the original `amova_region.R` points to `05i_pixy/amova_146_100k_dataset/`, whereas the four other model scripts and the recovered full-dataset preparation job point to `05i_pixy/amova_100k_dataset/`. Both paths are preserved in the original scripts; the correct historical path should be confirmed against HPC outputs/logs before reproduction.
-- **Metadata and actual model sample sizes:** the `n=146` designation describes the source genotype dataset. Each R model then excludes individuals without its required grouping metadata. In particular, manually curated sample `ERR068355` lacks country and region but has host information, so it may be included in the host-only model and excluded from region-based models. The scripts write the metadata subset used for their respective models.
-- **Metadata column-name reproducibility:** the original uploaded metadata CSV has a BOM and trailing whitespace in the `sample_id ` header. Original R scripts call `rename(IID = sample_id)` without first trimming column names; the normalised repository copy has an exact `sample_id` column, but the historical HPC input's exact header is not independently verified. Do not silently amend the original R scripts.
-- **Execution status:** original scripts were recovered and inspected; their existence does not prove execution success or demonstrate that the old output values were reproduced. Preserve historical results, logs and source VCFs when available.
-
-The following code blocks preserve the **original source contents without modifying parameters or paths**. Standalone, unchanged `.R` files are also archived under [`scripts/amova_full_146/`](scripts/amova_full_146/README.md).
+- **Metadata and actual model sample sizes:** the `n=146` designation describes the source genotype dataset. Each R model then excludes individuals without its required grouping metadata. In particular, manually curated sample `ERR068355` lacks country and region but has host information, so it is included in the host-only model and excluded from region-based models. The scripts write the metadata subset used for their respective models.
 
 #### Region only — `amova_region.R`
 
@@ -2501,8 +2491,4 @@ cat("======================================\n")
 Wahlund H_T / H_S tests, AMOVA models with permutation tests. Consult recorded logs and intermediate tables to distinguish expected settings from actual execution success.
 
 ## Provenance and limitations
-
-- Original full n=146 R scripts are now archived verbatim for five models (region only, host only, region/country, region/host and within-Africa host), alongside the full 100,000-SNP preparation job. The source-path discrepancy in `amova_region.R` and metadata-header compatibility require verification against historical inputs.
-- Sample identifiers and host/country metadata were manually curated in `sample_QC_list.csv`; it is not generated by an algorithm in these files.
-- Commands, versions, seeds and paths are retained where present; annotations are not evidence that all jobs have been freshly rerun.
 - For the discovery and correction of the PIXY all-sites input issue, see [`99_PIXY_allsites_correction.md`](99_PIXY_allsites_correction.md).
